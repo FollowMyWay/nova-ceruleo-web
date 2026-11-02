@@ -1,7 +1,6 @@
 {
-  "commit": "f45641514c41227f2844eded931016303cda7cd0",
+  "commit": "802a9828791045226e8ca84b1d8e76fdcb16389c",
   "branch": "personajes-ia2",
-  "fecha": "2026-11-02T21:15:00Z",
-  "anterior": "9201e25 (ia2)",
-  "nota": "build publicado en 51e91b7: ia2 + personajes nuevos, texturas comprimidas"
+  "fecha": "2026-11-02T22:12:58.485Z",
+  "anterior": "f45641514c41227f2844eded931016303cda7cd0"
 }
