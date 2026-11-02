@@ -17670,7 +17670,12 @@ function loop(ts){
     /* M2.3 (mundo compartido). El cliente envía intenciones, nunca posiciones: destino {x, y}, dirección {dx, dy}
        con |d| <= 1, o {} para detenerse. El servidor simula y responde con instantáneas. */
     char_select: { id: 'int' },
-    move: { x: 'num?', y: 'num?', dx: 'num?', dy: 'num?', seq: 'int?' },
+    /* Alpha: q=1 agrega el destino al final del camino (puntos de paso del cliente, que el servidor recorre con su
+       propia velocidad y colisión); sin q, el destino reemplaza al camino. */
+    move: { x: 'num?', y: 'num?', dx: 'num?', dy: 'num?', seq: 'int?', q: 'int?' },
+    /* Alpha: el jugador murió (combate local): el servidor lo lleva al punto de reaparición del juego
+       (world.respawn de shared/, no una posición del cliente). */
+    respawn: {},
     leave: {}
   };
   /* Mensajes servidor -> cliente (documentación; el servidor los arma con make()).
@@ -17751,10 +17756,15 @@ var NCMP_DEFAULT_URL="wss://play.novaceruleo.org/ws";
    - Entrada al mundo compartido con un personaje ONLINE efímero: nunca se guarda en el navegador (writeChars queda
      anulado mientras la sesión en línea está activa) y los personajes locales no se migran ni se tocan.
    - Movimiento autoritativo: el juego predice como siempre (mismo paso, navStep y colisión); el cliente envía la
-     DIRECCIÓN en la que realmente se mueve (o "detenerse"), a lo sumo ~12 por segundo, y corrige con la posición del
-     servidor (diseño M0: diferencia > 48 = salto; quieto = se acerca en ~150 ms).
-   - Otros jugadores: se cargan en SOC.peers (módulo social), que ya los interpola y los dibuja con drawPerson y el
-     orden de profundidad del mundo: el renderizado no cambia.
+     CAMINO que realmente recorre (puntos de paso cada ~66 ms, en los giros y al detenerse; el servidor los recorre con
+     su propia velocidad y colisión), y se reconcilia con la
+     posición del servidor (Alpha): la instantánea propia llega con retraso (latencia + 100 ms entre instantáneas),
+     así que se compara con la posición que el propio cliente TUVO en ese momento (historial de ~1,5 s), no con la
+     actual. Si coinciden no se corrige nada; si difieren, la diferencia se reparte en ~200 ms (sin retrocesos) y
+     solo una diferencia grande (> 160, p. ej. un teletransporte local) salta a la posición del servidor.
+   - Otros jugadores: se cargan en SOC.peers (módulo social), que los dibuja con drawPerson y el orden de profundidad
+     del mundo. Su posición se interpola entre instantáneas del servidor con un retraso fijo (~1,6 instantáneas), con
+     el reloj del servidor (tick), para que se muevan a velocidad pareja aunque los mensajes lleguen a saltos.
    - En línea todavía no hay monstruos, combate, mazmorras ni chat compartidos (etapas posteriores): el mundo local se
      vacía de monstruos y las mazmorras muestran "próximamente".
    - Desconexión: reintentos con espera creciente y reanudación con el token (sessionStorage de esta pestaña); vuelve
@@ -17766,12 +17776,29 @@ var NCMP=(function(){
   var def=typeof NCMP_DEFAULT_URL==="string"?NCMP_DEFAULT_URL:null;
   var url=raw==="0"?null:raw==="1"?"ws://127.0.0.1:10000/ws":/^wss?:\/\/[^\s]+$/.test(raw)?raw:!m?def:null;
   return {on:!!url,url:url,ws:null,st:"off",account:null,chars:[],me:null,charId:null,inWorld:false,srv:null,peers:{},
-    sendT:0,lastDir:null,moving:false,retry:0,retryT:null,noRetry:false,q:0,log:[],tokKey:"nc_mp_token:"+(url||"")};
+    sendT:0,lastDir:null,moving:false,hist:[],corr:{x:0,y:0},clk:null,tickMs:50,snapMs:100,stats:{snaps:0,fix:0,jumps:0,maxErr:0},retry:0,retryT:null,noRetry:false,q:0,log:[],tokKey:"nc_mp_token:"+(url||"")};
 })();
 if(NCMP.on){
 (function(){
   var P=window.NC_PROTO;
   function mpLog(t){NCMP.log.push(t);if(NCMP.log.length>40)NCMP.log.shift()}
+  /* Interfaz de la Alpha en línea: sin "Propuestas de arte" (herramienta de revisión de arte; los recursos que usa el
+     juego no se tocan) y sin acceso ADM salvo para OWNER/ADMIN, roles que asigna SOLO el servidor (auth.account.role).
+     El modo individual (#mp=0) no pasa por aquí: sigue siendo la 0.3.4. */
+  var STAFF={owner:1,admin:1};
+  function isStaff(){return !!(NCMP.account&&STAFF[NCMP.account.role])}
+  (function(){
+    var st=document.createElement("style");
+    st.textContent="#prbtn,#prpan{display:none!important}body:not(.nc-staff) #admBtn,body:not(.nc-staff) #admWin{display:none!important}";
+    document.head.appendChild(st);
+    var b=document.getElementById("prbtn");if(b)b.remove();
+  })();
+  function staffUi(){
+    var on=isStaff();document.body.classList.toggle("nc-staff",on);
+    if(!on){try{if(winOpen("admWin"))closeWin("admWin")}catch(e){}}
+  }
+  var origOpenWin=openWin;
+  openWin=function(id){if(id==="admWin"&&!isStaff())return;return origOpenWin(id)};
   function send(o){if(NCMP.ws&&NCMP.ws.readyState===1){NCMP.ws.send(JSON.stringify(o));return true}return false}
   function tok(v){try{if(v===undefined)return sessionStorage.getItem(NCMP.tokKey);if(v)sessionStorage.setItem(NCMP.tokKey,v);else sessionStorage.removeItem(NCMP.tokKey)}catch(e){}return null}
   var ERR={registration_closed:"El registro de cuentas está cerrado en este servidor.",bad_username:"Usuario inválido (3 a 16 letras, números o _).",
@@ -17832,7 +17859,7 @@ if(NCMP.on){
       var c=NCMP.chars.filter(function(x){return x.id===+b.dataset.del})[0];if(!c)return;
       var n=window.prompt("Para borrar a "+c.name+" escribí su nombre exacto:","");if(n!=null)send({t:"char_delete",id:c.id,name:n});}});
     el("mpCreate").onclick=function(){msg("");send({t:"char_create",name:el("mpCName").value,cls:el("mpCCls").value})};
-    el("mpLogout").onclick=function(){send({t:"logout"});tok(null);NCMP.account=null;form("login")};
+    el("mpLogout").onclick=function(){send({t:"logout"});tok(null);NCMP.account=null;staffUi();form("login")};
     NCMP.st="chars";show(true);
   }
 
@@ -17858,9 +17885,9 @@ if(NCMP.on){
     mpLog(m.t);
     switch(m.t){
       case"welcome":NCMP.retry=0;status("Conectado");var t=tok();if(t){NCMP.st="authing";send({t:"resume",token:t})}else form("login");break;
-      case"auth":NCMP.account=m.account;if(m.token)tok(m.token);
+      case"auth":NCMP.account=m.account;staffUi();if(m.token)tok(m.token);
         if(NCMP.charId&&NCMP.resumeWorld){send({t:"char_select",id:NCMP.charId})}else send({t:"char_list"});msg("");break;
-      case"auth_off":NCMP.account=null;form("login");break;
+      case"auth_off":NCMP.account=null;staffUi();form("login");break;
       case"chars":NCMP.chars=m.list||[];if(m.created){var nm=el("mpCName");if(nm)nm.value=""}charsView();break;
       case"enter":enter(m);break;
       case"snap":onSnap(m);break;
@@ -17882,8 +17909,39 @@ if(NCMP.on){
   /* ---------- mundo ---------- */
   var origWrite=writeChars;
   writeChars=function(o){if(NCMP.session)return true;return origWrite(o)};          /* nunca guarda personajes en línea */
-  var origEnterDg=enterDungeon;
-  enterDungeon=function(id){if(NCMP.session){toast("Las mazmorras en línea llegan en una etapa posterior.");return}return origEnterDg(id)};
+  /* Monstruos y mazmorras en línea (Alpha): LOCALES de cada jugador, como en el modo individual (todavía no son
+     compartidos). En la mazmorra el servidor conserva al personaje en la entrada; al morir, el servidor lo lleva al
+     punto de reaparición del juego (mensaje respawn: no es una posición del cliente). */
+  var origDie=playerDie;
+  playerDie=function(){
+    origDie();
+    if(NCMP.inWorld){send({t:"respawn"});NCMP.hist.length=0;NCMP.corr={x:0,y:0};NCMP.srv={x:R.x,y:R.y};NCMP.moving=false;NCMP.lastWp=null}
+  };
+  /* Menos amontonamiento en el Cementerio Maldito y la Fortaleza Rota (solo en línea): campamentos con la mitad de
+     esbirros y los monstruos sueltos repartidos por la zona, a 150 o más entre sí. */
+  CAMPS.forEach(function(c){
+    if((c.b==="cem"||c.b==="ris")&&c.comp&&!c.ncHalf){var q={};for(var k in c.comp)q[k]=Math.ceil(c.comp[k]/2);c.comp=q;c.ncHalf=true}
+  });
+  var origSpawnWorld=spawnWorld;
+  spawnWorld=function(){var l=origSpawnWorld();spreadMobs(l);return l};
+  function spreadMobs(list){
+    var Z={cem:[140,2160,BY+60,WH-100],ris:[GX+60,SX-110,120,GY-80]},placed=[],i,e,b,z,t,x,y,ok,j,sp=NCMP.stats.spread={moved:0,failed:0};
+    for(i=0;i<list.length;i++){e=list[i];if(e.cmp)continue;b=biomeAt(e.x,e.y);if(!Z[b])placed.push(e)}
+    for(i=0;i<list.length;i++){
+      e=list[i];if(e.cmp)continue;b=biomeAt(e.x,e.y);z=Z[b];if(!z)continue;
+      var md=150;
+      for(t=0;t<400;t++){
+        if(t===250)md=110;                                              /* zona llena: un poco menos de distancia */
+        x=rnd(z[0],z[1]);y=rnd(z[2],z[3]);
+        if(biomeAt(x,y)!==b||hazard(x,y,20)||inCamp(x,y,60)||capNear(x,y,40)||solidAt(x,y,12)||waterNear(x,y,30))continue;
+        ok=true;for(j=0;j<placed.length;j++)if(Math.abs(placed[j].x-x)<md&&Math.abs(placed[j].y-y)<md&&Math.hypot(placed[j].x-x,placed[j].y-y)<md){ok=false;break}
+        if(ok){e.x=e.hx=x;e.y=e.hy=y;break}
+      }
+      if(t<400){sp.moved++;placed.push(e)}else{sp.failed++;e.ncDrop=true}  /* sin lugar libre: ese no aparece */
+    }
+    for(i=list.length-1;i>=0;i--)if(list[i].ncDrop)list.splice(i,1);
+    wFixSpawns(list);dgClearEnemies(list);
+  }
   showIntro=function(){$("#intro").hidden=true;if(!NCMP.ws)connect();else if(NCMP.account)send({t:"char_list"});else form("login")};
   function enter(m){
     var me=m.me;NCMP.me=me;NCMP.charId=me.id;NCMP.session=true;NCMP.resumeWorld=true;
@@ -17893,9 +17951,11 @@ if(NCMP.on){
       stInit(S);giveWeapon(0,true);invAddItem("hp1",3);invAddItem("mp1",2);
       startRun();
     }
-    R.worldE.length=0;R.enemies=R.worldE;R.target=null;R.dest=null;R.auto=false;  /* sin monstruos locales en línea */
+    if(R.scene!=="world")leaveDungeon(false);
+    R.enemies=R.worldE;R.target=null;R.dest=null;R.auto=false;    /* monstruos LOCALES de cada jugador (como en el modo individual) */
     R.x=me.x;R.y=me.y;R.hp=Math.min(maxHp(),me.hp||maxHp());R.mp=Math.min(maxMp(),me.mp||maxMp());
-    NCMP.srv={x:me.x,y:me.y};NCMP.moving=false;NCMP.lastDir=null;
+    NCMP.srv={x:me.x,y:me.y};NCMP.moving=false;NCMP.lastDir=null;NCMP.lastWp=null;NCMP.hist.length=0;NCMP.corr={x:0,y:0};NCMP.clk=null;
+    if(m.tick>0)NCMP.tickMs=1000/m.tick;if(m.snap>0)NCMP.snapMs=1000/m.snap;
     $("#intro").hidden=true;show(false);msg("");
     el("mpBarT").textContent="En línea · "+me.name;bar.hidden=false;
     NCMP.inWorld=true;keys={};
@@ -17904,11 +17964,69 @@ if(NCMP.on){
   function pause(){NCMP.inWorld=false;bar.hidden=true;keys={}}
   el("mpLeave").onclick=function(){if(NCMP.inWorld){send({t:"leave"});pause();clearPeers()}};
 
+  function sendWp(x,y,now){
+    x=Math.round(x*100)/100;y=Math.round(y*100)/100;
+    if(send({t:"move",x:x,y:y,q:1,seq:++NCMP.q})){NCMP.sendT=now;NCMP.lastWp={x:x,y:y}}
+  }
+  /* Reloj del servidor: st = k * tickMs. clk = desfase (servidor - performance.now()) del mensaje que llegó más
+     rápido; baja despacio si el reloj local adelanta, para no quedar atado a un solo mensaje veloz. */
+  function srvNow(){return NCMP.clk==null?null:performance.now()+NCMP.clk}
   function onSnap(m){
+    var now=performance.now(),st=m.k*NCMP.tickMs,smp=st-now;
+    if(NCMP.clk==null||smp>NCMP.clk)NCMP.clk=smp;else NCMP.clk+=(smp-NCMP.clk)*0.02;
+    NCMP.stats.snaps++;
     for(var i=0;i<m.e.length;i++){
       var e=m.e[i];
-      if(e[0]===NCMP.charId){NCMP.srv={x:e[1],y:e[2],k:m.k};continue}
-      var o=NCMP.peers[e[0]];if(o){o.tx=e[1];o.ty=e[2]}
+      if(e[0]===NCMP.charId){NCMP.srv={x:e[1],y:e[2],k:m.k};reconcile(e[1],e[2],now);continue}
+      var o=NCMP.peers[e[0]];if(!o)continue;
+      var b=o.buf||(o.buf=[]);
+      if(!b.length||st>b[b.length-1].t)b.push({t:st,x:e[1],y:e[2]});
+      if(b.length>40)b.splice(0,b.length-40);
+    }
+  }
+  /* Reconciliación: la posición del servidor corresponde a un instante pasado del cliente. Se busca en el historial
+     de posiciones predichas (último 1,5 s) el punto más cercano a la del servidor: la diferencia con ESE punto es el
+     error real (desvío por colisión, velocidad o un intento de trampa), no el retraso de la red. */
+  var SNAP_DIST=160,DEAD=1.5;
+  function reconcile(sx,sy,now){
+    if(!R||R.scene!=="world")return;                                    /* en la mazmorra (local) no se corrige */
+    /* punto más cercano sobre el CAMINO (segmentos entre posiciones consecutivas, incluida la actual): con pocos
+       cuadros por segundo los puntos quedan separados y compararlos sueltos inventaría un error */
+    var h=NCMP.hist,bx=R.x,by=R.y,bd=Math.hypot(R.x-sx,R.y-sy),qx=R.x,qy=R.y;
+    for(var i=h.length-1;i>=0;i--){
+      if(now-h[i].t>1500)break;
+      var ax=h[i].x,ay=h[i].y,vx=qx-ax,vy=qy-ay,vv=vx*vx+vy*vy,u=vv>1e-9?((sx-ax)*vx+(sy-ay)*vy)/vv:0;
+      u=u<0?0:u>1?1:u;
+      var cx=ax+vx*u,cy=ay+vy*u,d=Math.hypot(cx-sx,cy-sy);
+      if(d<bd){bd=d;bx=cx;by=cy}
+      qx=ax;qy=ay;
+    }
+    var ex=sx-bx,ey=sy-by,er=Math.hypot(ex,ey);
+    if(er>NCMP.stats.maxErr)NCMP.stats.maxErr=er;
+    var lg=NCMP.stats.log||(NCMP.stats.log=[]);lg.push([Math.round(now),Math.round(sx),Math.round(sy),Math.round(bx),Math.round(by),Math.round(R.x),Math.round(R.y),Math.round(er)]);if(lg.length>60)lg.shift();
+    if(er>SNAP_DIST){R.x=sx;R.y=sy;h.length=0;NCMP.corr={x:0,y:0};NCMP.stats.jumps++;return}
+    if(er<DEAD){NCMP.corr={x:0,y:0};return}
+    NCMP.corr={x:ex,y:ey};NCMP.stats.fix++;
+  }
+  /* Otros jugadores: posición interpolada en (reloj del servidor - retraso). Sin extrapolar: si faltan datos, quedan
+     en la última posición conocida. */
+  function peersFrame(dt){
+    var sn=srvNow();if(sn==null)return;
+    var rt=sn-NCMP.snapMs*1.6;
+    for(var k in NCMP.peers){
+      var o=NCMP.peers[k],b=o.buf;if(!b||!b.length)continue;
+      var x,y;
+      if(rt<=b[0].t){x=b[0].x;y=b[0].y}
+      else if(rt>=b[b.length-1].t){x=b[b.length-1].x;y=b[b.length-1].y}
+      else{
+        var j=b.length-2;while(j>0&&b[j].t>rt)j--;
+        var a=b[j],c=b[j+1],f=(rt-a.t)/((c.t-a.t)||1);x=a.x+(c.x-a.x)*f;y=a.y+(c.y-a.y)*f;
+        if(j>0)b.splice(0,j);
+      }
+      var dx=x-o.x,dy=y-o.y,v=Math.hypot(dx,dy)/Math.max(dt,1e-3);
+      if(Math.hypot(dx,dy)>400){o.x=x;o.y=y}                              /* reaparición lejana: sin cruzar el mapa */
+      else{o.x=x;o.y=y;if(Math.abs(dx-dy)>.05)o.fl=(dx-dy)>0?1:-1}
+      o.tx=x;o.ty=y;o.mv=v>15;
     }
   }
   function addPeer(e){
@@ -17916,6 +18034,10 @@ if(NCMP.on){
     var o=NCMP.peers[e.id]||{id:"mp"+e.id,x:e.x,y:e.y,fl:1,mv:false,ph:Math.random()*6,k:"pl",acc:"none",hs:"short",sk:"#e0b08a",pn:"#2a2430",tr:"#d9b24a",sc:1.25};
     o.n=String(e.name||"").slice(0,16);o.c=c;o.l=e.lvl||1;o.tx=e.x;o.ty=e.y;o.s="w";o.h=100;o.pt=null;
     o.tn=CLASSES[c].col;o.hr=["#2a1a10","#6a4a2a","#b8742a","#c8c8d0","#7a2a2a"][o.n.length%5];o.role="Nv "+o.l+" · "+CLASSES[c].name;
+    var sn=srvNow();o.buf=[{t:sn==null?0:sn-NCMP.snapMs*1.6,x:e.x,y:e.y}];
+    o.mpPeer=true;if(!o.pS||o.pS.cls!==c){var wt=(WTYPES[c]&&WTYPES[c][0])||{k:"espada",n:"Espada",spd:1};
+      o.pS={name:o.n,lvl:o.l,cls:c,arm:{},jew:{},wing:null,inv:[],weapon:{t:"w",wt:wt.k,n:wt.n,rar:0,power:1,spd:wt.spd||1,cls:c,v:0},st:{}};o.pR={}}
+    o.pS.name=o.n;o.pS.lvl=o.l;
     NCMP.peers[e.id]=o;syncPeers();
   }
   function delPeer(id){delete NCMP.peers[id];syncPeers()}
@@ -17942,6 +18064,11 @@ if(NCMP.on){
     var t=performance.now(),real=NCMP.lastT?Math.min(0.25,(t-NCMP.lastT)/1000):dt;NCMP.lastT=t;
     if(NCMP.fixedDt)real=dt;                                            /* pruebas paso a paso */
     var elapsed=real;
+    /* discontinuidad: si la posición cambió fuera del paso normal (un salto local, un portal), el historial ya no
+       describe un camino continuo y la próxima instantánea se compara con la posición actual */
+    var h0=NCMP.hist.length?NCMP.hist[NCMP.hist.length-1]:null;
+    if(h0&&R&&Math.hypot(R.x-h0.x,R.y-h0.y)>2)NCMP.hist.length=0;
+    var fx=R?R.x:0,fy=R?R.y:0;
     var wx=null,wy=null;
     while(real>1e-6){
       var st=Math.min(0.05,real),px=R.x,py=R.y;NCMP.wp=null;origUpdate(st);real-=st;if(!NCMP.inWorld||!R)return;
@@ -17949,18 +18076,58 @@ if(NCMP.on){
     }
     dt=Math.max(dt,1e-3);
     if(R.scene!=="world")return;
-    var dx=wx==null?0:wx,dy=wy==null?0:wy,l=Math.hypot(dx,dy),now=performance.now();
-    if(l>0.01){
-      var ux=dx/l,uy=dy/l,ld=NCMP.lastDir,turn=!ld||Math.abs(ux-ld.dx)+Math.abs(uy-ld.dy)>0.06;
-      if((!NCMP.moving||turn)&&now-NCMP.sendT>80||now-NCMP.sendT>1000){
-        if(send({t:"move",dx:Math.round(ux*1e4)/1e4,dy:Math.round(uy*1e4)/1e4,seq:++NCMP.q})){NCMP.sendT=now;NCMP.lastDir={dx:ux,dy:uy};NCMP.moving=true}
-      }
-    }else if(NCMP.moving){if(send({t:"move",seq:++NCMP.q})){NCMP.sendT=now;NCMP.moving=false;NCMP.lastDir=null}}
-    /* corrección con la posición del servidor (autoridad) */
-    var s=NCMP.srv;if(!s)return;
-    var ex=s.x-R.x,ey=s.y-R.y,d=Math.hypot(ex,ey);
-    if(d>48){R.x=s.x;R.y=s.y}
-    else if(!NCMP.moving&&d>0.05){var f=Math.min(1,elapsed/0.15);R.x+=ex*f;R.y+=ey*f}   /* ~150 ms reales, a cualquier tasa de cuadros */
+    /* Intención (Alpha): puntos de paso del camino que el jugador realmente recorrió (después de la colisión del
+       juego), cada ~66 ms y en cada giro, y el punto final al detenerse. El servidor los recorre con SU velocidad y
+       SU colisión (no son posiciones impuestas): así sigue el mismo camino que la predicción local, también en las
+       esquinas y junto a los muros, y termina exactamente donde se detuvo el jugador. */
+    var now=performance.now(),mx=R.x-fx,my=R.y-fy,ml=Math.hypot(mx,my),lw=NCMP.lastWp;
+    if(ml>0.01){
+      var ux=mx/ml,uy=my/ml,ld=NCMP.lastDir,turn=ld&&Math.abs(ux-ld.dx)+Math.abs(uy-ld.dy)>0.15;
+      if(!NCMP.moving&&(!lw||Math.hypot(fx-lw.x,fy-lw.y)>0.05))sendWp(fx,fy,now);  /* arranque: desde donde estaba */
+      if(turn&&now-NCMP.sendT>30||now-NCMP.sendT>66)sendWp(R.x,R.y,now);
+      NCMP.moving=true;NCMP.lastDir={dx:ux,dy:uy};
+    }else if(NCMP.moving){
+      if(!lw||Math.hypot(R.x-lw.x,R.y-lw.y)>0.05)sendWp(R.x,R.y,now);
+      NCMP.moving=false;NCMP.lastDir=null;
+    }
+    /* reconciliación: se aplica de a poco la corrección pendiente (~200 ms reales) y se corre el historial en la
+       misma medida, para que la próxima instantánea mida solo el error que quede */
+    var c=NCMP.corr;
+    if(c.x||c.y){
+      var f=Math.min(1,elapsed/0.2),ax=c.x*f,ay=c.y*f;
+      R.x+=ax;R.y+=ay;c.x-=ax;c.y-=ay;
+      for(var i=0;i<NCMP.hist.length;i++){NCMP.hist[i].x+=ax;NCMP.hist[i].y+=ay}
+      if(Math.abs(c.x)<0.05&&Math.abs(c.y)<0.05)c.x=c.y=0;
+    }
+    if(Math.hypot(R.x-fx,R.y-fy)>400*elapsed+20)NCMP.hist.length=0;    /* salto dentro del paso del juego */
+    NCMP.hist.push({t:now,x:R.x,y:R.y});
+    while(NCMP.hist.length&&now-NCMP.hist[0].t>1600)NCMP.hist.shift();
+    peersFrame(elapsed);
+  };
+
+  /* Otros jugadores con el MISMO modelo y animación que el personaje propio (drawPlayer del juego, sin cambios): se
+     dibujan prestándole al dibujo su estado (posición, giro, paso, clase y equipo inicial) y se restaura todo después,
+     como ya hace el juego con el cuerpo caído. El estado de animación de cada uno se guarda aparte. */
+  var PK=["x","y","yaw","vs","sph","v","ac","anim","animT","stag","guard","rage","lx","ly","face","lt","target","dest","lev","levE","lw","wo","fsm","wph","pf","tn","php","hp","lvx","lvy","ldt","wp","wpT","vx"];
+  var origDrawPerson=drawPerson;
+  drawPerson=function(n){
+    if(!n||!n.mpPeer||!n.pS||!R||!S)return origDrawPerson(n);
+    var bR={},bV={},k,S0=S;
+    for(k in R)bR[k]=R[k];for(k in VPD)bV[k]=VPD[k];
+    try{
+      for(k=0;k<PK.length;k++)R[PK[k]]=n.pR[PK[k]];
+      R.x=n.x;R.y=n.y;R.target=null;R.dest=null;R.anim=0;R.guard=0;R.rage=0;R.stag=0;R.hp=100;R.php=100;R.vx=[];R.wp=null;
+      VPD.dead=null;if(n.pV)for(k in n.pV)VPD[k]=n.pV[k];
+      S=n.pS;
+      drawPlayer();
+      for(k=0;k<PK.length;k++)n.pR[PK[k]]=R[PK[k]];
+      n.pV={};for(k in VPD)if(k!=="dead")n.pV[k]=VPD[k];
+    }catch(e){mpLog("peer draw "+(e&&e.message))}
+    finally{
+      S=S0;
+      for(k in R)if(!(k in bR))delete R[k];for(k in bR)R[k]=bR[k];
+      for(k in VPD)if(!(k in bV))delete VPD[k];for(k in bV)VPD[k]=bV[k];
+    }
   };
 
   window.__mp=NCMP;                                                     /* para las pruebas y la consola */
