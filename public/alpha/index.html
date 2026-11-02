@@ -17691,6 +17691,8 @@ function loop(ts){
     patk: { id: 'int', k: 'int?' },                                     // mordida de la mascota (k 1 especial, 2 área)
     /* mazmorras: entrar (id) o salir (sin id; die=1 si cayó adentro) y avisar cada baja (tipo, oleada, élite, jefe) */
     dg: { id: 'str:16?', die: 'int?' },
+    q_accept: {},                                                       // misiones del Gremio (las valida el servidor)
+    q_deliver: {},
     dkill: { k: 'str:16', w: 'int', e: 'int?', b: 'int?', x: 'num?', y: 'num?' },
     leave: {},
     /* Alpha · grupos (en el mundo): invitar por nombre de personaje, aceptar, rechazar, salir, expulsar (líder). */
@@ -17718,7 +17720,7 @@ function loop(ts){
     'party', 'party_inv', 'party_dec', 'party_off',
     'adm_log',
     'mspawn', 'mdespawn', 'mhit', 'mdie', 'mfx', 'phit', 'pdie', 'prog', 'pheal',
-    'loot', 'lootgone', 'inv', 'dg');   // etapa B4/B5: loot {id, x, y, it}; lootgone {id, got?, full?}; inv {inv, eq, gold, hp, maxHp, mp, maxMp, err?, dh?, dm?, sold?}   // etapa B: monstruos, golpes y progreso                                   // adm_log {list [{id, at, section, field, action, who, size}]}
+    'loot', 'lootgone', 'inv', 'dg', 'quest');   // etapa B4/B5: loot {id, x, y, it}; lootgone {id, got?, full?}; inv {inv, eq, gold, hp, maxHp, mp, maxMp, err?, dh?, dm?, sold?}   // etapa B: monstruos, golpes y progreso                                   // adm_log {list [{id, at, section, field, action, who, size}]}
   /* Errores de cuentas (no suman al control de abuso del protocolo). */
   var AUTH_ERRORS = ['registration_closed', 'bad_username', 'bad_email', 'weak_password', 'user_taken', 'email_taken',
     'bad_credentials', 'banned', 'too_many', 'busy', 'bad_token', 'auth_unavailable', 'server_error'];
@@ -17960,6 +17962,7 @@ if(NCMP.on){
       case"loot":onLoot(m);break;
       case"lootgone":onLootGone(m);break;
       case"dg":onDg(m);break;
+      case"quest":onQuest(m);break;
       case"pheal":if(R){R.hp=m.hp;addFloat(R.x,R.y,"+"+m.amt+" PV","#9be37a",30)}break;
       case"spawn":addPeer(m.e);break;
       case"despawn":delPeer(m.id);break;
@@ -18920,7 +18923,7 @@ if(NCMP.on){
     R.potCd=1;send({t:"use",u:it.uid});return true};
   /* Alquimia y Tienda: pociones a precio del servidor (valor × 0,8) */
   var SHOPP=["hp1","hp2","mp1","mp2"];
-  var oBuyPrice=buyPrice;buyPrice=function(it){if(srvInv()&&it&&it.t==="i"&&SHOPP.indexOf(it.id)>=0){var o=CFG.all.OPT||{},sp=typeof o.shopPrice==="number"?o.shopPrice:1;return Math.max(1,Math.round(ITEMS[it.id].v*.8*sp))}return oBuyPrice.apply(this,arguments)};
+  var oBuyPrice=buyPrice;buyPrice=function(it){if(srvInv()&&it&&it.t==="i"&&SHOPP.indexOf(it.id)>=0){var o=CFG.all.OPT||{},sp=typeof o.shopPrice==="number"?o.shopPrice:1;return Math.max(1,Math.round({hp1:15,mp1:15,hp2:45,mp2:45}[it.id]*sp))}return oBuyPrice.apply(this,arguments)};
   var oBuy=buyItem;buyItem=function(idx){if(!srvInv())return oBuy.apply(this,arguments);
     var e=SHOP.stock[idx];if(!e)return;if(e.it.t==="i"&&SHOPP.indexOf(e.it.id)>=0){send({t:"buy",id:e.it.id});return}
     toast("En línea, por ahora la tienda vende pociones. Las armas y armaduras salen de los monstruos y las mazmorras.")};
@@ -18928,9 +18931,23 @@ if(NCMP.on){
     if(srvInv()){var n=cityById(CITY.dlg);
       if(n&&n.k==="alch"&&a==="buy"){send({t:"buy",id:id});return}
       if(n&&n.k==="alch"&&a==="craft"){toast("La elaboración en línea llega en la próxima actualización. Podés comprar pociones en la pestaña Comprar.");return}
-      if(n&&n.k==="quest"&&a==="deliver"){toast("Las misiones en línea llegan en la próxima actualización.");return}
+      if(n&&n.k==="quest"&&a==="accept"){if(S.qst===0)send({t:"q_accept"});return}
+      if(n&&n.k==="quest"&&a==="deliver"){if(S.qst===2)send({t:"q_deliver"});return}
       if(n&&n.k==="inn"&&a==="rest"){toast("En línea la vida se recupera sola en la ciudad.");return}}
     return oCityAct.apply(this,arguments)};
+  /* la Alquimista vuelve a abrir en línea (vende pociones a precio del servidor); la elaboración llega después */
+  if(typeof econIsClosedNpc==="function"){var oEconC=econIsClosedNpc;econIsClosedNpc=function(n){if(srvInv()&&n&&n.k==="alch")return false;return oEconC.apply(this,arguments)}}
+  /* misiones del Gremio: el servidor lleva el progreso con las bajas que valida y paga la recompensa */
+  var oQP=questProgress;questProgress=function(k){if(srvInv())return;return oQP.apply(this,arguments)};
+  function onQuest(m){
+    if(!S)return;S.quest=m.quest;S.qst=m.qst;S.prog=m.prog;
+    try{var q=QUESTS[S.quest];
+      if(m.accepted)toast("Misión aceptada: "+q.t);
+      if(m.done)toast("Objetivo cumplido: entregá «"+QUESTS[S.quest].t+"» a la Capitana Vael");
+      if(m.delivered){toast("Misión entregada: +"+m.xp+" XP · "+fmtMoney(m.gold)+(m.item?" · "+m.item:"")+(m.sold?" (mochila llena: vendida por "+fmtMoney(m.sold)+")":""));S.st&&(S.st.quests=(S.st.quests||0)+1)}
+    }catch(x){}
+    try{renderQuest()}catch(x){}try{if(winOpen("npcWin")){var n=cityById(CITY.dlg);if(n&&(m.accepted||m.delivered))citySay(n,true);cityRender()}}catch(x){}
+  }
   var NOT_YET="Disponible en línea en la próxima actualización.";
   var oForgeGo=forgeGo;forgeGo=function(){if(srvInv()){toast("Forja: "+NOT_YET);return}return oForgeGo.apply(this,arguments)};
   var oPetEv=petEvolve;petEvolve=function(){if(srvInv()){toast("Evolución de la mascota: "+NOT_YET);return}return oPetEv.apply(this,arguments)};
