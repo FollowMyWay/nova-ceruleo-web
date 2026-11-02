@@ -1,0 +1,15 @@
+{
+  "fecha": "2026-11-02T21:39:30.725Z",
+  "files": {
+    "NovaCeruleo-Lanzador-Windows.zip": {
+      "parts": 2,
+      "size": 37851112,
+      "sha256": "a8a5854b725b6e6933a86f76c938fd3679034f263f455d6d0c319024744dbd13"
+    },
+    "NovaCeruleo-Lanzador-Linux.zip": {
+      "parts": 2,
+      "size": 28280765,
+      "sha256": "7d5dbfa5d4c78363410371070b3f03b55cb22b73da36ea032cc7df8d6d6c5375"
+    }
+  }
+}
