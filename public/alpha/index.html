@@ -17685,7 +17685,10 @@ function loop(ts){
     party_kick: { id: 'int' },
     /* Alpha · panel ADM global (solo OWNER/ADMIN, rol del servidor): sección, campo ('' = toda la sección) y valor
        en JSON. El servidor valida, guarda y difunde a todos (cfg). */
-    adm_set: { s: 'str:16', k: 'str:32', v: 'str:3800' }
+    adm_set: { s: 'str:16', k: 'str:32', v: 'str:3800' },
+    /* Alpha · auditoría: historial (OWNER, ADMIN, MODERATOR) y restaurar el valor anterior de un cambio (OWNER, ADMIN) */
+    adm_log: { n: 'int?' },
+    adm_restore: { id: 'int' }
   };
   /* Mensajes servidor -> cliente (documentación; el servidor los arma con make()).
      M2.1: auth {account {id, user, role}, token?} (token solo al registrarse o ingresar; se entrega una vez),
@@ -17696,7 +17699,8 @@ function loop(ts){
                                                   // spawn {e {id, name, cls, lvl, x, y}}; despawn {id, why}; left {}
   S2C.push('ok',                                  // Alpha: ok {q} (operación aceptada)
     'cfg',                                        // cfg {v, all} al ingresar; cfg {v, s, val} en cada cambio
-    'party', 'party_inv', 'party_dec', 'party_off');
+    'party', 'party_inv', 'party_dec', 'party_off',
+    'adm_log');                                   // adm_log {list [{id, at, section, field, action, who, size}]}
   /* Errores de cuentas (no suman al control de abuso del protocolo). */
   var AUTH_ERRORS = ['registration_closed', 'bad_username', 'bad_email', 'weak_password', 'user_taken', 'email_taken',
     'bad_credentials', 'banned', 'too_many', 'busy', 'bad_token', 'auth_unavailable', 'server_error'];
@@ -17809,14 +17813,25 @@ if(NCMP.on){
     var b=document.getElementById("prbtn");if(b)b.remove();
   })();
   function staffUi(){
-    var on=isStaff();document.body.classList.toggle("nc-staff",on);
+    var on=isStaff()||isViewer();document.body.classList.toggle("nc-staff",on);
     if(on)admOk=true;                                                   /* rol verificado por el servidor: sin clave local */
     if(!on){try{if(winOpen("admWin"))closeWin("admWin")}catch(e){}}
   }
   var origOpenWin=openWin;
-  openWin=function(id){if(id==="admWin"&&!isStaff())return;return origOpenWin(id)};
+  openWin=function(id){if(id==="admWin"&&!isStaff()&&!isViewer())return;return origOpenWin(id)};
   function send(o){if(NCMP.ws&&NCMP.ws.readyState===1){NCMP.ws.send(JSON.stringify(o));return true}return false}
-  function tok(v){try{if(v===undefined)return sessionStorage.getItem(NCMP.tokKey);if(v)sessionStorage.setItem(NCMP.tokKey,v);else sessionStorage.removeItem(NCMP.tokKey)}catch(e){}return null}
+  /* Sesión: en la pestaña (sessionStorage) y, con «Recordarme», también en esta computadora (localStorage) para
+     volver a entrar sin escribir nada mientras la sesión no venza (14 días) o hasta «Salir». La contraseña NUNCA se
+     guarda: solo el usuario (para completarlo) y el token de sesión. */
+  var REM_KEY="nc_mp_remember",USER_KEY="nc_mp_user";
+  function lsGet(k){try{return localStorage.getItem(k)}catch(e){return null}}
+  function lsSet(k,v){try{if(v==null)localStorage.removeItem(k);else localStorage.setItem(k,v)}catch(e){}}
+  function remembered(){return lsGet(REM_KEY)==="1"}
+  function tok(v){try{
+    if(v===undefined)return sessionStorage.getItem(NCMP.tokKey)||(remembered()?lsGet(NCMP.tokKey):null);
+    if(v){sessionStorage.setItem(NCMP.tokKey,v);if(remembered())lsSet(NCMP.tokKey,v)}
+    else{sessionStorage.removeItem(NCMP.tokKey);lsSet(NCMP.tokKey,null)}
+  }catch(e){}return null}
   var ERR={registration_closed:"El registro de cuentas está cerrado en este servidor.",bad_username:"Usuario inválido (3 a 16 letras, números o _).",
     bad_email:"Correo inválido.",weak_password:"La contraseña necesita entre 10 y 128 caracteres.",user_taken:"Ese usuario ya existe.",
     email_taken:"Ese correo ya tiene una cuenta.",bad_credentials:"Usuario o contraseña incorrectos.",banned:"Cuenta suspendida.",
@@ -17832,12 +17847,17 @@ if(NCMP.on){
     "#mpBox input,#mpBox select{width:100%;box-sizing:border-box;margin-top:4px}#mpBox .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}"+
     "#mpBox .msg{min-height:18px;color:#ff8a7a;font-size:13px;margin-top:8px}#mpBox .st{color:var(--muted);font-size:12px}"+
     "#mpBox .chr{display:flex;justify-content:space-between;align-items:center;gap:8px;margin:6px 0}#mpBox button.ok{border-color:var(--nova);color:var(--nova);font-weight:700}"+
-    "#mpBar{position:fixed;top:40px;left:50%;transform:translateX(-50%);z-index:61;background:#100b09e6;border:1px solid var(--line);border-radius:999px;padding:4px 12px;font-size:12px;display:flex;gap:10px;align-items:center}"+
-    "#mpBar[hidden]{display:none}#mpBar button{font-size:12px;padding:2px 10px}";
+    /* Alpha: barra en línea chica en un costado (sin el nombre en el centro de la pantalla) */
+    "#mpBar{position:fixed;top:58px;left:12px;z-index:61;background:#100b09cc;border:1px solid var(--line);border-radius:999px;padding:2px;font-size:11px;display:flex;gap:6px;align-items:center}"+
+    "#mpBar[hidden]{display:none}#mpBarT{display:none}#mpBar button{font-size:11px;padding:2px 9px;border-radius:999px}"+
+    ".mpRem{display:flex!important;flex-direction:row!important;gap:8px;align-items:center;font-size:13px;margin:4px 0 2px}.mpRem input{width:auto!important;margin:0}"+
+    /* controles de cámara: más chicos, abajo a la derecha junto a AUTO */
+    "#cam2ui{right:auto!important;left:auto!important;top:auto!important;right:108px!important;bottom:22px!important;gap:3px!important;font-size:10px!important;opacity:.82}"+
+    "#cam2ui:hover{opacity:1}#cam2ui button,#cam2ui select{padding:2px 6px!important;font-size:10px!important;min-width:22px!important;border-radius:5px!important}";
   document.head.appendChild(css);
   var box=document.createElement("div");box.className="overlay";box.id="mpBox";box.innerHTML='<div class="intro"><h2>Nova Ceruleo · En línea</h2><div id="mpBody"></div><div class="msg" id="mpMsg" role="alert"></div><div class="st" id="mpSt"></div></div>';
   document.body.appendChild(box);
-  var bar=document.createElement("div");bar.id="mpBar";bar.hidden=true;bar.innerHTML='<span id="mpBarT">En línea</span><button id="mpLeave">Personajes</button>';
+  var bar=document.createElement("div");bar.id="mpBar";bar.hidden=true;bar.innerHTML='<span id="mpBarT">En línea</span><button id="mpLeave" title="Volver a la lista de personajes">👥 Personajes</button>';
   document.body.appendChild(bar);
   function el(id){return document.getElementById(id)}
   function msg(t){el("mpMsg").textContent=t||""}
@@ -17850,11 +17870,14 @@ if(NCMP.on){
       '<label>Usuario<input id="mpUser" maxlength="16" autocomplete="username" spellcheck="false"></label>'+
       (reg?'<label>Correo<input id="mpMail" type="email" maxlength="254" autocomplete="email" spellcheck="false"></label>':"")+
       '<label>Contraseña<input id="mpPass" type="password" maxlength="128" autocomplete="'+(reg?"new-password":"current-password")+'"></label>'+
+      '<label class="mpRem"><input type="checkbox" id="mpRem"'+(remembered()?" checked":"")+'> Recordarme en esta computadora</label>'+
       '<div class="row"><button class="ok" id="mpGo">'+(reg?"Crear cuenta":"Ingresar")+'</button><button id="mpAlt">'+(reg?"Ya tengo cuenta":"Crear cuenta")+'</button></div>';
     guardKeys(el("mpBody"));
+    if(!reg&&remembered()&&lsGet(USER_KEY)){el("mpUser").value=lsGet(USER_KEY);setTimeout(function(){try{el("mpPass").focus()}catch(e){}},0)}
     el("mpAlt").onclick=function(){msg("");form(reg?"login":"register")};
     el("mpGo").onclick=function(){
-      var u=el("mpUser").value.trim(),p=el("mpPass").value;
+      var u=el("mpUser").value.trim(),p=el("mpPass").value,rem=el("mpRem")&&el("mpRem").checked;
+      lsSet(REM_KEY,rem?"1":null);lsSet(USER_KEY,rem?u:null);if(!rem)lsSet(NCMP.tokKey,null);
       if(reg)send({t:"register",user:u,email:el("mpMail").value.trim(),pass:p});else send({t:"login",user:u,pass:p});
       msg("");NCMP.st="authing";
     };
@@ -17900,7 +17923,7 @@ if(NCMP.on){
   function onMsg(m){
     mpLog(m.t);
     switch(m.t){
-      case"welcome":NCMP.retry=0;status("Conectado");var t=tok();if(t){NCMP.st="authing";send({t:"resume",token:t})}else form("login");break;
+      case"welcome":NCMP.build=m.build;NCMP.online=m.online;NCMP.retry=0;status("Conectado");var t=tok();if(t){NCMP.st="authing";send({t:"resume",token:t})}else form("login");break;
       case"auth":NCMP.account=m.account;staffUi();if(m.token)tok(m.token);
         if(NCMP.charId&&NCMP.resumeWorld){send({t:"char_select",id:NCMP.charId})}else send({t:"char_list"});msg("");break;
       case"auth_off":NCMP.account=null;staffUi();form("login");break;
@@ -17915,6 +17938,8 @@ if(NCMP.on){
         else if(m.why==="shutdown")msg("El servidor se está reiniciando. Reconectando…");
         break;
       case"cfg":onCfg(m);break;
+      case"online":NCMP.online=m.n;break;
+      case"adm_log":NCMP.admLog=m.list||[];try{if(winOpen("admWin")&&(admTab==="nclog"||admTab==="ncdash"))renderAdmin()}catch(e){}break;
       case"ok":break;
       case"party":onParty(m);break;
       case"party_inv":onPartyInv(m);break;
@@ -17947,7 +17972,8 @@ if(NCMP.on){
      en el navegador (el modo individual conserva lo suyo). La velocidad del personaje queda en 1 (la simula el servidor). */
   var CFG={v:0,all:{}};
   var MOBS_DEF={dens:1,sp:130,camp:.6},LOOT_DEF={qmin:1,qmax:1,wm:1,am:1,pm:1,mm:1,jm:1,
-    b0:{l:0,mul:1,minr:0},b1:{l:20,mul:1,minr:0},b2:{l:40,mul:1,minr:1}};
+    b0:{l:0,mul:1,minr:0},b1:{l:20,mul:1,minr:0},b2:{l:40,mul:1,minr:1},
+    z_plains:1,z_ruins:1,z_cem:1,z_ris:1,z_vol:1,z_snow:1,z_desert:1,z_dun:1};
   var PARTY_DEF={on:1,max:4,bonus:10,radius:1200,share:1};
   function cfgSec(k,def){var v=CFG.all[k],o={},q;for(q in def)o[q]=def[q];if(v&&typeof v==="object")for(q in v)if(q in def)o[q]=v[q];return o}
   function MOBS(){return cfgSec("MOBS",MOBS_DEF)}
@@ -18040,10 +18066,15 @@ if(NCMP.on){
        rareza mínima (0 común, 1 rara, 2 épica, 3 legendaria);
      - multiplicadores globales por categoría (armas, armaduras, pociones, materiales, joyas);
      - cantidad de objetos por drop (mín..máx). */
-  var lootExtra=[];
+  var lootExtra=[],zoneCache={t:0,z:{}};
+  function zoneOf(kind){                                                 /* bioma donde aparece cada monstruo (o mazmorra) */
+    var now=Date.now();if(now-zoneCache.t>10000&&typeof mobZones==="function"&&R){zoneCache.t=now;var z=mobZones(),o={};for(var k in z)o[k]=z[k].zone;zoneCache.z=o}
+    return zoneCache.z[kind]||"dun";
+  }
   rollDrop=function(kind){
     var L=LOOTC(),lv=(DEFS[kind]&&DEFS[kind].lvl)||1,bd=L.b0;if(lv>=L.b1.l)bd=L.b1;if(lv>=L.b2.l&&L.b2.l>=L.b1.l)bd=L.b2;
-    var base=DROPC[kind]==null?.3:DROPC[kind],ch=clamp(base*OPT.drop*bd.mul,0,1);
+    var zm=L["z_"+zoneOf(kind)];if(zm==null)zm=1;
+    var base=DROPC[kind]==null?.3:DROPC[kind],ch=clamp(base*OPT.drop*bd.mul*zm,0,1);
     if(Math.random()>=ch)return null;
     var mr=Math.max(MINRAR[kind]||0,Math.min(RARS.length-1,Math.round(bd.minr)||0));
     function one(){
@@ -18156,7 +18187,7 @@ if(NCMP.on){
   function addPeer(e){
     var c=CLASSES[e.cls]?e.cls:"guerrero";
     var o=NCMP.peers[e.id]||{id:"mp"+e.id,x:e.x,y:e.y,fl:1,mv:false,ph:Math.random()*6,k:"pl",acc:"none",hs:"short",sk:"#e0b08a",pn:"#2a2430",tr:"#d9b24a",sc:1.25};
-    o.n=String(e.name||"").slice(0,16);o.c=c;o.l=e.lvl||1;o.tx=e.x;o.ty=e.y;o.s="w";o.h=100;o.pt=null;
+    o.gm=e.gm?1:0;o.n=String(e.name||"").slice(0,16);o.c=c;o.l=e.lvl||1;o.tx=e.x;o.ty=e.y;o.s="w";o.h=100;o.pt=null;
     o.tn=CLASSES[c].col;o.hr=["#2a1a10","#6a4a2a","#b8742a","#c8c8d0","#7a2a2a"][o.n.length%5];o.role="Nv "+o.l+" · "+CLASSES[c].name;
     var sn=srvNow();o.buf=[{t:sn==null?0:sn-NCMP.snapMs*1.6,x:e.x,y:e.y}];
     o.mpPeer=true;if(!o.pS||o.pS.cls!==c){var wt=(WTYPES[c]&&WTYPES[c][0])||{k:"espada",n:"Espada",spd:1};
@@ -18255,13 +18286,13 @@ if(NCMP.on){
       for(k=0;k<PK.length;k++)R[PK[k]]=n.pR[PK[k]];
       R.x=n.x;R.y=n.y;R.target=null;R.dest=null;R.anim=0;R.guard=0;R.rage=0;R.stag=0;R.hp=100;R.php=100;R.vx=[];R.wp=null;
       VPD.dead=null;if(n.pV)for(k in n.pV)VPD[k]=n.pV[k];
-      S=n.pS;
+      S=n.pS;NCMP.drawPeer=n;
       drawPlayer();
       for(k=0;k<PK.length;k++)n.pR[PK[k]]=R[PK[k]];
       n.pV={};for(k in VPD)if(k!=="dead")n.pV[k]=VPD[k];
     }catch(e){mpLog("peer draw "+(e&&e.message))}
     finally{
-      S=S0;
+      S=S0;NCMP.drawPeer=null;
       for(k in R)if(!(k in bR))delete R[k];for(k in bR)R[k]=bR[k];
       for(k in VPD)if(!(k in bV))delete VPD[k];for(k in bV)VPD[k]=bV[k];
     }
@@ -18316,62 +18347,417 @@ if(NCMP.on){
   var oAddXp=addXp;
   addXp=function(n){if(NCMP.inWorld&&NCMP.partyBonus>0)n=n*(1+NCMP.partyBonus/100);return oAddXp(n)};
 
-  /* ===== Alpha · panel ADM en línea: secciones separadas =====
-     Arriba, un aviso: los cambios valen para TODOS (servidor). Pestañas nuevas: Grupo (reglas que aplica el servidor),
-     Botín (bandas por nivel, categorías y cantidades; las probabilidades por monstruo y las rarezas siguen en Drops,
-     con su % real) y Reparto (monstruos por bioma y campamentos). */
-  var NCTABS=[["ncparty","Grupo"],["ncloot","Botín"],["ncmobs","Reparto"]];
+  /* ===== Alpha · panel ADM en línea, reorganizado por secciones =====
+     Dashboard · Configuración global · Grupos · Mobs (por zona, mapa, campamentos) · Biomas (reparto) · Drop y Loot
+     (por monstruo, reglas, simulador) · Editor de ítems (OWNER) · Identidad GM (OWNER) · Balance · Registros ·
+     Herramientas. Cada sección muestra solo lo que el rol permite (rol del servidor). Las pestañas originales del
+     juego siguen haciendo lo suyo (sus valores ahora viajan al servidor). */
+  var VIEWERS={owner:1,admin:1,moderator:1};
+  function isViewer(){return !!(NCMP.account&&VIEWERS[NCMP.account.role])}
+  function isOwner(){return !!(NCMP.account&&NCMP.account.role==="owner")}
+  var GROUPS=[
+    {n:"Dashboard",t:[["ncdash","Resumen"]],mod:1},
+    {n:"Configuración global",t:[["gen","General"]]},
+    {n:"Grupos",t:[["ncparty","Reglas del grupo"]]},
+    {n:"Mobs",t:[["ncmon","Por zona"],["ncmap","Mapa de mobs"],["camp","Campamentos"]]},
+    {n:"Biomas y regiones",t:[["ncmobs","Reparto"]]},
+    {n:"Drop y Loot",t:[["drop","Por monstruo"],["ncloot","Reglas"],["ncsim","Simulador"]]},
+    {n:"Editor de ítems",t:[["ncitems","Ítems"]],own:1},
+    {n:"Identidad GM",t:[["ncgm","Insignia y nombre"]],own:1},
+    {n:"Balance",t:[["pet","Mascota"],["wing","Alas"],["jew","Joyas"],["forge","Forja"],["shop","Tienda"]]},
+    {n:"Registros",t:[["nclog","Historial"]],mod:1},
+    {n:"Herramientas",t:[["tools","Mi personaje"]]}
+  ];
+  function groupsFor(){return GROUPS.filter(function(g){if(g.own&&!isOwner())return false;if(!isStaff()&&!g.mod)return false;return true})}
+  var ZONES=[["plains","Llanuras de Ceruleo"],["ruins","Ruinas Nova"],["cem","Cementerio Maldito"],["ris","Fortaleza Rota"],["vol","Tierras Ardientes"],["snow","Cumbres Heladas"],["desert","Dunas del Ocaso"],["dun","Mazmorras"]];
+  var ZCOL={town:"#d8c48a",dtown:"#e0b070",plains:"#6f9a4a",ruins:"#8a8070",cem:"#4a5060",ris:"#7a7a90",vol:"#a04a2a",snow:"#c8d8e8",desert:"#d0b070",dun:"#555"};
+  function mobZones(){
+    var cnt={},z={},k;
+    (R&&R.worldE||[]).forEach(function(e){if(e.dead)return;var b=biomeAt(e.hx==null?e.x:e.hx,e.hy==null?e.y:e.hy),c=cnt[e.kind]||(cnt[e.kind]={});c[b]=(c[b]||0)+1});
+    for(k in DEFS){var c=cnt[k],best=null,bn=0,tot=0;if(c)for(var b in c){tot+=c[b];if(c[b]>bn){bn=c[b];best=b}}
+      if(DEFS[k].cb){var cm=CAMPS.filter(function(q){return q.boss===k})[0];if(cm)best=cm.b}
+      z[k]={zone:best||"dun",n:tot}}
+    return z;
+  }
   var origRenderAdmin=renderAdmin;
   renderAdmin=function(){
     origRenderAdmin();
     if(!NCMP.session)return;
     var b=$("#admBody");if(!b||!admOk||!winOpen("admWin"))return;
-    var tabs=b.querySelector(".tabs");
-    if(tabs){NCTABS.forEach(function(t){var x=document.createElement("button");x.className="tab"+(admTab===t[0]?" on":"");x.dataset.atab=t[0];x.textContent=t[1];tabs.appendChild(x)})}
-    var note=document.createElement("p");note.className="hint";note.id="ncAdmNote";
-    note.innerHTML="<b>Modo en línea:</b> cada cambio se guarda en el servidor y se aplica a <b>todos</b> los jugadores conectados (y a los que entren después). "+
-      (isStaff()?"Velocidad del personaje fija en 1 (la simula el servidor).":"Solo OWNER/ADMIN pueden cambiar valores.");
-    if(tabs)tabs.parentNode.insertBefore(note,tabs.nextSibling);
-    var h="";
-    if(admTab==="ncparty"){
-      var P=PARTYC();
-      h+='<h3>Grupos (Party)</h3><p class="hint">Reglas que aplica el SERVIDOR: invitaciones, máximo de integrantes y bonus de experiencia por integrante cercano.</p><div class="tbl">'+
-        ncRow("Grupos habilitados","PARTY","on",P.on,0,1,1,"0 = no se pueden formar grupos (los actuales se disuelven).")+
-        ncRow("Máximo de integrantes","PARTY","max",P.max,2,8,1,"Entre 2 y 8.")+
-        ncRow("Bonus de experiencia (% por integrante)","PARTY","bonus",P.bonus,0,200,1,"Ej.: 10 = con 3 cerca, +20 % para cada uno.")+
-        ncRow("Distancia para el bonus","PARTY","radius",P.radius,100,5000,50,"Integrantes a esta distancia o menos cuentan como cerca.")+
-        ncRow("Exigir cercanía","PARTY","share",P.share,0,1,1,"1 = solo cuentan los cercanos; 0 = cuentan todos los del grupo.")+'</div>';
-    }else if(admTab==="ncloot"){
-      var L=LOOTC(),tot=RARS.reduce(function(a,r){return a+r.w},0)||1;
-      h+='<h3>Rareza (con los pesos de Drops)</h3><p class="hint">'+RARS.map(function(r){return '<span style="color:'+r.c+'">'+r.n+' '+(Math.round(r.w/tot*1000)/10)+' %</span>'}).join(" · ")+'</p>';
-      h+='<h3>Bandas por nivel del monstruo</h3><p class="hint">Multiplicador de la probabilidad de drop y rareza mínima (0 común, 1 rara, 2 épica, 3 legendaria).</p><div class="tbl">';
-      ["b0","b1","b2"].forEach(function(bk,i){var q=L[bk];
-        h+=(i?ncRow("Banda "+(i+1)+" · desde nivel","LOOT",bk+".l",q.l,1,200,1,""):'<div class="prm"><div><b>Banda 1 · desde nivel 0</b></div></div>')+
-          ncRow("Banda "+(i+1)+" · multiplicador de drop","LOOT",bk+".mul",q.mul,0,10,.1,"")+ncRow("Banda "+(i+1)+" · rareza mínima","LOOT",bk+".minr",q.minr,0,3,1,"")});
-      h+='</div><h3>Categorías (multiplican los pesos de cada monstruo)</h3><div class="tbl">'+
-        [["wm","Armas"],["am","Armaduras"],["pm","Pociones"],["mm","Materiales"],["jm","Joyas"]].map(function(c){return ncRow(c[1],"LOOT",c[0],L[c[0]],0,10,.1,"")}).join("")+
-        '</div><h3>Cantidad por drop</h3><div class="tbl">'+ncRow("Objetos mínimos","LOOT","qmin",L.qmin,1,5,1,"")+ncRow("Objetos máximos","LOOT","qmax",L.qmax,1,5,1,"")+'</div>'+
-        '<p class="hint">Probabilidad por monstruo, categorías por monstruo y pesos de rareza: pestaña <b>Drops</b>.</p>';
-    }else if(admTab==="ncmobs"){
-      var M=MOBS();
-      h+='<h3>Reparto de monstruos (todos los biomas)</h3><p class="hint">Se aplica al instante: todos los jugadores regeneran sus monstruos con el reparto nuevo. Los atributos de cada monstruo están en <b>Monstruos</b> y los campamentos en <b>Campamentos</b>.</p><div class="tbl">'+
-        ncRow("Densidad de monstruos sueltos","MOBS","dens",M.dens,.2,1.5,.05,"1 = normal; 0,5 = la mitad.")+
-        ncRow("Distancia mínima entre monstruos","MOBS","sp",M.sp,40,400,10,"Más alta = más repartidos.")+
-        ncRow("Esbirros por campamento (multiplicador)","MOBS","camp",M.camp,0,1.5,.05,"1 = como el juego; 0,5 = la mitad.")+'</div>';
-    }else return;
-    var wrap=document.createElement("div");wrap.innerHTML=h;b.appendChild(wrap);
+    var gs=groupsFor(),cur=null;
+    gs.forEach(function(g){g.t.forEach(function(t){if(t[0]===admTab)cur=g})});
+    if(!cur){admTab=gs[0].t[0][0];return renderAdmin()}
+    var tabs=b.querySelector(".tabs");if(tabs)tabs.remove();
+    var nav=document.createElement("div");nav.className="ncnav";
+    nav.innerHTML='<div class="tabs ncg">'+gs.map(function(g){return '<button class="tab'+(g===cur?" on":"")+'" data-atab="'+g.t[0][0]+'">'+g.n+'</button>'}).join("")+'</div>'+
+      (cur.t.length>1?'<div class="tabs ncs">'+cur.t.map(function(t){return '<button class="tab mini'+(t[0]===admTab?" on":"")+'" data-atab="'+t[0]+'">'+t[1]+'</button>'}).join("")+'</div>':"")+
+      '<p class="hint" id="ncAdmNote"><b>Modo en línea</b> · rol <b>'+((NCMP.account&&NCMP.account.role)||"?").toUpperCase()+'</b> · cada cambio se guarda en el servidor y se aplica a <b>todos</b> los jugadores. Velocidad del personaje fija en 1 (la simula el servidor).</p>';
+    b.insertBefore(nav,b.firstChild);
+    var h=null;
+    if(admTab==="ncdash")h=admDash();
+    else if(admTab==="ncparty")h=admParty();
+    else if(admTab==="ncmon")h=admMon();
+    else if(admTab==="ncmap")h=admMap();
+    else if(admTab==="ncmobs")h=admMobs();
+    else if(admTab==="ncloot")h=admLoot();
+    else if(admTab==="ncsim")h=admSim();
+    else if(admTab==="ncitems")h=admItems();
+    else if(admTab==="ncgm")h=admGm();
+    else if(admTab==="nclog")h=admLogView();
+    if(h==null)return;
+    var wrap=document.createElement("div");wrap.className="ncpane";wrap.innerHTML=h;b.appendChild(wrap);
+    if(admTab==="ncmap")drawMobMap();
+    if(admTab==="ncgm")drawGmPreview();
   };
-  function ncRow(label,sec,path,val,min,max,step,hint){
-    return '<div class="prm"><div><b>'+label+'</b>'+(hint?'<small>'+hint+'</small>':'')+'</div><div class="pin"><input type="number" class="ncin" data-ncs="'+sec+'" data-ncp="'+path+'" value="'+val+'" min="'+min+'" max="'+max+'" step="'+step+'"'+(isStaff()?'':' disabled')+'></div></div>';
+  function ncRow(label,sec,path,val,min,max,step,hint,dis){
+    return '<div class="prm"><div><b>'+label+'</b>'+(hint?'<small>'+hint+'</small>':'')+'</div><div class="pin"><input type="number" class="ncin" data-ncs="'+sec+'" data-ncp="'+path+'" value="'+val+'" min="'+min+'" max="'+max+'" step="'+step+'"'+(isStaff()&&!dis?'':' disabled')+'></div></div>';
   }
+  function admDash(){
+    var it=CFG.all.ITEMS||{},n=0,np=0,k;for(k in it){n++;if(it[k].status==="pub")np++}
+    var P=PARTYC(),M=MOBS();
+    if(!NCMP.logReq||Date.now()-NCMP.logReq>5000){NCMP.logReq=Date.now();send({t:"adm_log",n:8})}
+    var near=Object.keys(NCMP.peers).map(function(id){return NCMP.peers[id]});
+    return '<h3>Resumen</h3><div class="tbl">'+
+      [["Jugadores en línea",NCMP.online!=null?NCMP.online:"?"],["Servidor",NCMP.build||"?"],["Tu cuenta",(NCMP.account?NCMP.account.user:"?")+" · "+((NCMP.account&&NCMP.account.role)||"").toUpperCase()],
+       ["Configuración (versión)",CFG.v+" · secciones propias: "+(Object.keys(CFG.all).filter(function(x){return x!=="PARTY"&&x!=="GM"}).join(", ")||"ninguna")],
+       ["Grupos",P.on?"habilitados · máx "+P.max+" · bonus +"+P.bonus+" % por integrante · distancia "+P.radius:"deshabilitados"],
+       ["Monstruos (este cliente)",(R&&R.worldE?R.worldE.length:0)+" en el mundo · densidad "+M.dens+" · distancia "+M.sp+" · esbirros ×"+M.camp],
+       ["Ítems personalizados",n+" (publicados: "+np+")"]].map(function(r){return '<div class="tr two"><span><b>'+r[0]+'</b></span><span>'+esc(String(r[1]))+'</span></div>'}).join("")+'</div>'+
+      '<h3>Jugadores cerca</h3>'+(near.length?'<div class="tbl">'+near.map(function(o){return '<div class="tr two"><span><b>'+esc(o.n)+'</b></span><span>Nv '+o.l+' · '+esc(CLASSES[o.c]?CLASSES[o.c].name:o.c)+(o.gm?" · GM":"")+'</span></div>'}).join("")+'</div>':'<p class="hint">Nadie a la vista.</p>')+
+      '<h3>Últimos cambios</h3>'+logRows((NCMP.admLog||[]).slice(0,8),false)+
+      '<p class="hint">Los roles (OWNER, ADMIN, MODERATOR) se asignan solo en el servidor (herramienta roles.js), nunca desde el juego.</p>';
+  }
+  function admParty(){
+    var P=PARTYC();
+    return '<h3>Grupos (Party)</h3><p class="hint">Reglas que aplica el SERVIDOR: invitaciones, máximo de integrantes y bonus de experiencia por integrante cercano. Hoy cada jugador gana la XP de sus propios monstruos (son locales) con el bonus del grupo.</p><div class="tbl">'+
+      ncRow("Grupos habilitados","PARTY","on",P.on,0,1,1,"0 = no se pueden formar grupos (los actuales se disuelven).")+
+      ncRow("Máximo de integrantes","PARTY","max",P.max,2,8,1,"Entre 2 y 8.")+
+      ncRow("Bonus de experiencia (% por integrante)","PARTY","bonus",P.bonus,0,200,1,"Ej.: 10 = con 3 cerca, +20 % para cada uno.")+
+      ncRow("Distancia para el bonus","PARTY","radius",P.radius,100,5000,50,"Integrantes a esta distancia o menos cuentan como cerca.")+
+      ncRow("Exigir cercanía","PARTY","share",P.share,0,1,1,"1 = solo cuentan los cercanos; 0 = cuentan todos los del grupo.")+'</div>';
+  }
+  function admMon(){
+    var Z=mobZones(),sel=NCMP.admZone||"all",h='<h3>Monstruos por zona</h3><div class="tabs ncs">'+[["all","Todas"]].concat(ZONES).map(function(z){return '<button class="tab mini'+(sel===z[0]?" on":"")+'" data-ncz="'+z[0]+'">'+z[1]+'</button>'}).join("")+'</div>';
+    h+='<p class="hint">Vida: a los que aparecen de nuevo. Daño, velocidad, XP y alerta: al instante. ★ = jefe de campamento. «En el mundo» = cantidad actual.</p>';
+    ZONES.forEach(function(z){
+      if(sel!=="all"&&sel!==z[0])return;
+      var ks=Object.keys(DEFS).filter(function(k){return Z[k].zone===z[0]}).sort(function(a,b){return (DEFS[a].lvl||0)-(DEFS[b].lvl||0)});
+      if(!ks.length)return;
+      h+='<h3 style="color:'+(ZCOL[z[0]]||"#ccc")+'">'+z[1]+' · '+ks.reduce(function(a,k){return a+Z[k].n},0)+' en el mundo</h3><div class="tbl"><div class="tr th"><span>Monstruo</span><span>Vida</span><span>Daño</span><span>Velocidad</span><span>XP</span><span>Alerta</span></div>';
+      ks.forEach(function(kd){var q=DEFS[kd];
+        h+='<div class="tr"><span><b>'+q.n+(q.cb?" ★":"")+'</b><small>Nv '+q.lvl+' · en el mundo: '+Z[kd].n+'</small></span>'+["hp","atk","spd","xp","aggro"].map(function(f){return numF("df",kd,q[f],0,f==="hp"?10:1,f)}).join("")+'</div>'});
+      h+='</div>';
+    });
+    return h;
+  }
+  function admMap(){
+    var cnt={},Z={};(R&&R.worldE||[]).forEach(function(e){if(e.dead)return;var b=biomeAt(e.hx,e.hy);cnt[b]=(cnt[b]||0)+1});
+    return '<h3>Mapa de mobs</h3><p class="hint">Mundo completo (10 000 × 3 400): color = bioma, punto = monstruo, círculo = campamento, ★ = jefe. Es el reparto que genera este cliente con la configuración vigente (igual para todos).</p>'+
+      '<canvas id="ncMobMap" width="760" height="260" style="width:100%;max-width:760px;border:1px solid #5a4a78;border-radius:6px;background:#111"></canvas>'+
+      '<div class="tbl">'+ZONES.filter(function(z){return z[0]!=="dun"}).map(function(z){return '<div class="tr two"><span><b style="color:'+ZCOL[z[0]]+'">■</b> '+z[1]+'</span><span>'+(cnt[z[0]]||0)+' monstruos</span></div>'}).join("")+'</div>';
+  }
+  function drawMobMap(){
+    var c=document.getElementById("ncMobMap");if(!c)return;var g=c.getContext("2d"),sx=c.width/WW,sy=c.height/WH,x,y;
+    for(x=0;x<WW;x+=50)for(y=0;y<WH;y+=50){g.fillStyle=ZCOL[biomeAt(x+25,y+25)]||"#333";g.globalAlpha=.55;g.fillRect(x*sx,y*sy,50*sx+1,50*sy+1)}
+    g.globalAlpha=1;
+    (R&&R.worldE||[]).forEach(function(e){if(e.dead)return;g.fillStyle=e.def&&e.def.cb?"#ffd36b":e.cmp?"#ff7b5b":"#fff";var r=e.def&&e.def.cb?3:1.4;g.beginPath();g.arc(e.x*sx,e.y*sy,r,0,7);g.fill()});
+    CAMPS.forEach(function(cm){g.strokeStyle="#ff7b5b";g.lineWidth=1;g.beginPath();g.arc(cm.x*sx,cm.y*sy,CAMPR*sx,0,7);g.stroke()});
+    if(R){g.fillStyle="#5be7ff";g.beginPath();g.arc(R.x*sx,R.y*sy,3.5,0,7);g.fill()}
+  }
+  function admMobs(){
+    var M=MOBS();
+    return '<h3>Reparto de monstruos (todos los biomas)</h3><p class="hint">Se aplica al instante: todos los jugadores regeneran sus monstruos con el reparto nuevo. Los atributos están en <b>Mobs</b>. Los monstruos son locales de cada jugador: no generan tráfico de red.</p><div class="tbl">'+
+      ncRow("Densidad de monstruos sueltos","MOBS","dens",M.dens,.2,1.5,.05,"1 = normal; 0,5 = la mitad.")+
+      ncRow("Distancia mínima entre monstruos","MOBS","sp",M.sp,40,400,10,"Más alta = más repartidos.")+
+      ncRow("Esbirros por campamento (multiplicador)","MOBS","camp",M.camp,0,1.5,.05,"1 = como el juego; 0,5 = la mitad.")+'</div>';
+  }
+  function admLoot(){
+    var L=LOOTC(),tot=RARS.reduce(function(a,r){return a+r.w},0)||1,h='';
+    h+='<h3>Rareza (pesos en «Por monstruo»)</h3><p class="hint">'+RARS.map(function(r){return '<span style="color:'+r.c+'">'+r.n+' '+(Math.round(r.w/tot*1000)/10)+' %</span>'}).join(" · ")+'</p>';
+    h+='<h3>Bandas por nivel del monstruo</h3><p class="hint">Multiplicador de la probabilidad de drop y rareza mínima (0 común, 1 rara, 2 épica, 3 legendaria).</p><div class="tbl">';
+    ["b0","b1","b2"].forEach(function(bk,i){var q=L[bk];
+      h+=(i?ncRow("Banda "+(i+1)+" · desde nivel","LOOT",bk+".l",q.l,1,200,1,""):'<div class="prm"><div><b>Banda 1 · desde nivel 0</b></div></div>')+
+        ncRow("Banda "+(i+1)+" · multiplicador de drop","LOOT",bk+".mul",q.mul,0,10,.1,"")+ncRow("Banda "+(i+1)+" · rareza mínima","LOOT",bk+".minr",q.minr,0,3,1,"")});
+    h+='</div><h3>Categorías (multiplican los pesos de cada monstruo; 0 = desactivada)</h3><div class="tbl">'+
+      [["wm","Armas"],["am","Armaduras"],["pm","Pociones"],["mm","Materiales"],["jm","Joyas"]].map(function(c){return ncRow(c[1],"LOOT",c[0],L[c[0]],0,10,.1,"")}).join("")+
+      '</div><h3>Por bioma o región (multiplicador de la probabilidad)</h3><div class="tbl">'+ZONES.map(function(z){return ncRow(z[1],"LOOT","z_"+z[0],L["z_"+z[0]],0,10,.1,"")}).join("")+
+      '</div><h3>Cantidad por drop</h3><div class="tbl">'+ncRow("Objetos mínimos","LOOT","qmin",L.qmin,1,5,1,"")+ncRow("Objetos máximos","LOOT","qmax",L.qmax,1,5,1,"")+'</div>'+
+      '<p class="hint">Probabilidad y categorías por monstruo: «Por monstruo». Ítems personalizados con drop propio: «Editor de ítems». Probar sin entregar objetos: «Simulador».</p>';
+    return h;
+  }
+  function admSim(){
+    var Z=mobZones(),sel=NCMP.simKind||Object.keys(DEFS)[0],r=NCMP.simRes;
+    var h='<h3>Simulador de drops</h3><p class="hint">Tira 1000 veces el botín de un monstruo con la configuración vigente, sin entregar objetos.</p><div class="row"><select id="ncSimK">'+
+      ZONES.map(function(z){var ks=Object.keys(DEFS).filter(function(k){return Z[k].zone===z[0]});return ks.length?'<optgroup label="'+z[1]+'">'+ks.map(function(k){return '<option value="'+k+'"'+(k===sel?" selected":"")+'>'+DEFS[k].n+' (Nv '+DEFS[k].lvl+')</option>'}).join("")+'</optgroup>':""}).join("")+
+      '</select> <button class="act" data-ncsim="1">Simular 1000</button></div>';
+    if(r&&r.k===sel){
+      h+='<div class="tbl">'+[["Kills con botín",r.hit+" ("+(r.hit/10).toFixed(1)+" %)"],["Objetos en total",r.items],["Armas",r.w],["Armaduras",r.a],["Joyas",r.j],["Pociones",r.p],["Materiales",r.m],["Personalizados",r.c]].map(function(x){return '<div class="tr two"><span><b>'+x[0]+'</b></span><span>'+x[1]+'</span></div>'}).join("")+'</div>'+
+        '<h3>Rareza de armas, armaduras y joyas</h3><div class="tbl">'+RARS.map(function(q,i){return '<div class="tr two"><span style="color:'+q.c+'"><b>'+q.n+'</b></span><span>'+(r.rar[i]||0)+'</span></div>'}).join("")+'</div>';
+    }
+    return h;
+  }
+  function simulate(kind){
+    var r={k:kind,hit:0,items:0,w:0,a:0,j:0,p:0,m:0,c:0,rar:{}},i,it,list;
+    for(i=0;i<1000;i++){
+      lootExtra.length=0;it=rollDrop(kind);list=(it?[it]:[]).concat(lootExtra);lootExtra.length=0;
+      if(list.length)r.hit++;
+      list.forEach(function(x){r.items++;if(x.cid)r.c++;if(x.t==="w")r.w++;else if(x.t==="a")r.a++;else if(x.t==="j")r.j++;else if(ITEMS[x.id]&&ITEMS[x.id].kind==="potion")r.p++;else r.m++;
+        if(x.rar!=null&&x.t!=="i")r.rar[x.rar]=(r.rar[x.rar]||0)+1});
+    }
+    return r;
+  }
+  function logRows(list,canRestore){
+    if(!list||!list.length)return '<p class="hint">Sin cambios registrados.</p>';
+    return '<div class="tbl">'+list.map(function(r){return '<div class="tr"><span><b>'+esc(r.section)+(r.field?"."+esc(r.field):"")+'</b><small>'+new Date(r.at).toLocaleString()+' · '+esc(r.who||"servidor")+(r.action==="restore"?" · restauración":"")+'</small></span>'+
+      (canRestore?'<span><button class="mini" data-ncrest="'+r.id+'">Restaurar lo anterior</button></span>':'')+'</div>'}).join("")+'</div>';
+  }
+  function admLogView(){
+    if(!NCMP.logReq||Date.now()-NCMP.logReq>3000){NCMP.logReq=Date.now();send({t:"adm_log",n:60})}
+    return '<h3>Historial de cambios</h3><p class="hint">Quién cambió qué y cuándo. «Restaurar lo anterior» vuelve esa sección al valor que tenía ANTES de ese cambio (queda registrado). Pide confirmación.</p>'+
+      '<div class="row"><button class="mini" data-nclog="1">Actualizar</button></div>'+logRows(NCMP.admLog,isStaff());
+  }
+  /* ---- identidad GM ---- */
+  var GM_DEF={on:1,col:"#ffd36b",glow:.8},GM_PRE=[["#ffd36b","Dorado"],["#ffe9a8","Oro claro"],["#5be7ff","Celeste"],["#ff7b5b","Fuego"],["#9be37a","Esmeralda"],["#e8e2f4","Blanco"]];
+  function GMC(){return cfgSec("GM",GM_DEF)}
+  function admGm(){
+    var G=GMC();
+    return '<h3>Identidad GM (solo OWNER)</h3><p class="hint">Insignia «GM» azul y dorada sobre el nombre y nombre con color y brillo propios, visibles para todos. Solo la lleva el personaje de la cuenta OWNER (lo decide el servidor).</p>'+
+      '<canvas id="ncGmPrev" width="320" height="90" style="background:#1a1626;border:1px solid #5a4a78;border-radius:6px"></canvas><div class="tbl">'+
+      ncRow("Insignia y nombre especial","GM","on",G.on,0,1,1,"1 = activado")+ncRow("Brillo del nombre","GM","glow",G.glow,0,1,.1,"0 a 1")+'</div>'+
+      '<h3>Color del nombre</h3><div class="row">'+GM_PRE.map(function(c){return '<button class="mini'+(G.col===c[0]?" on":"")+'" data-ncgmcol="'+c[0]+'" style="color:'+c[0]+'">'+c[1]+'</button>'}).join("")+
+      ' <input type="color" id="ncGmCol" value="'+G.col+'"></div>';
+  }
+  function drawGmPreview(){
+    var c=document.getElementById("ncGmPrev");if(!c)return;var g=c.getContext("2d");g.clearRect(0,0,c.width,c.height);
+    var ft=g.fillText;drawGmLabel(g,(S&&S.name||"Owner")+" Nv"+(S?S.lvl:1),160,62,GMC());
+  }
+  function drawGmLabel(g,txt,x,y,G){
+    g.save();g.font="700 12px 'Chakra Petch',sans-serif";g.textAlign="center";
+    if(G.on){g.fillStyle=G.col;g.shadowColor=G.col;g.shadowBlur=10*G.glow}else g.fillStyle="#dfe7ff";
+    g.fillText(txt,x,y);g.restore();
+    if(!G.on)return;
+    g.save();var w=22,h=12,bx=x-w/2,by=y-26;
+    g.fillStyle="#1f4fa8";g.strokeStyle="#ffd36b";g.lineWidth=1.4;
+    g.beginPath();if(g.roundRect)g.roundRect(bx,by,w,h,3);else g.rect(bx,by,w,h);g.fill();g.stroke();
+    g.fillStyle="#ffd36b";g.font="800 9px 'Chakra Petch',sans-serif";g.textAlign="center";g.textBaseline="middle";g.fillText("GM",x,by+h/2+.5);g.restore();
+  }
+  /* insignia y nombre del GM en el mundo: se intercepta solo el rótulo «Nombre NvX» que dibuja drawPlayer */
+  var origDrawPlayerGm=drawPlayer;
+  drawPlayer=function(){
+    var gm=NCMP.drawPeer?!!NCMP.drawPeer.gm:!!(NCMP.inWorld&&NCMP.me&&NCMP.me.gm),G=GMC();
+    if(!gm||!G.on)return origDrawPlayerGm.apply(this,arguments);
+    var own=Object.prototype.hasOwnProperty.call(ctx,"fillText"),ft=ctx.fillText,lab=(S&&S.name||"")+" Nv";
+    function restore(){if(own)ctx.fillText=ft;else delete ctx.fillText}
+    var hook=function(t,x,y){if(typeof t==="string"&&S&&t.indexOf(lab)===0){restore();try{drawGmLabel(ctx,t,x,y,G)}finally{ctx.fillText=hook}return}return ft.apply(ctx,arguments)};
+    ctx.fillText=hook;
+    try{return origDrawPlayerGm.apply(this,arguments)}finally{restore()}
+  };
+  /* ---- editor de ítems (OWNER) ---- */
+  var ITEM_TYPES=[["weapon","Arma"],["armor","Armadura"],["potion","Consumible"],["mat","Material"]];
+  function baseOptions(type,cls){
+    if(type==="weapon"){var l=[];Object.keys(WTYPES).forEach(function(c){if(cls&&c!==cls)return;WTYPES[c].forEach(function(w){l.push([w.k,w.n+" ("+c+")"])})});return l}
+    if(type==="armor")return SLOTS.map(function(s){return [s.k,s.n]});
+    var out=[];for(var k in ITEMS){var d=ITEMS[k];if(!d||k.indexOf("ci_")===0)continue;if(type==="potion"&&d.kind==="potion")out.push([k,d.n]);if(type==="mat"&&d.kind!=="potion"&&!/^wing/.test(k))out.push([k,d.n])}return out;
+  }
+  function admItems(){
+    var IT=CFG.all.ITEMS||{},ed=NCMP.itemEd||{type:"weapon",cls:"guerrero",base:"",name:"",desc:"",rar:1,lvl:1,power:20,def:0,hp:0,mp:0,crit:0,spd:1,heal:.4,mana:.4,v:100,status:"draft",dropTxt:""};
+    NCMP.itemEd=ed;if(!ed.base)ed.base=(baseOptions(ed.type,ed.cls)[0]||[""])[0];
+    var h='<h3>Objetos creados</h3>';
+    var ids=Object.keys(IT);
+    h+=ids.length?'<div class="tbl">'+ids.map(function(id){var d=IT[id];return '<div class="tr"><span><b style="color:'+RARS[d.rar||0].c+'">'+esc(d.name)+'</b><small>'+id+' · '+({weapon:"Arma",armor:"Armadura",potion:"Consumible",mat:"Material"}[d.type])+' · '+({draft:"borrador",pub:"PUBLICADO",off:"desactivado"}[d.status])+'</small></span><span>'+
+      '<button class="mini" data-ncit="edit" data-id="'+id+'">Editar</button><button class="mini" data-ncit="dup" data-id="'+id+'">Duplicar</button><button class="mini" data-ncit="give" data-id="'+id+'">Probar (darme)</button>'+
+      (d.status!=="pub"?'<button class="mini" data-ncit="pub" data-id="'+id+'">Publicar</button>':'<button class="mini" data-ncit="off" data-id="'+id+'">Desactivar</button>')+'<button class="mini" data-ncit="del" data-id="'+id+'">Borrar</button></span></div>'}).join("")+'</div>':'<p class="hint">Todavía no creaste objetos.</p>';
+    var f=function(k,lab,attrs){return '<label class="ncf">'+lab+'<input data-ncie="'+k+'" value="'+esc(String(ed[k]==null?"":ed[k]))+'" '+(attrs||"")+'></label>'};
+    var sel=function(k,lab,opts){return '<label class="ncf">'+lab+'<select data-ncie="'+k+'">'+opts.map(function(o){return '<option value="'+o[0]+'"'+(String(ed[k])===String(o[0])?" selected":"")+'>'+o[1]+'</option>'}).join("")+'</select></label>'};
+    h+='<h3>'+(ed.id?"Editar "+ed.id:"Nuevo objeto")+'</h3><p class="hint">El objeto usa la apariencia, el ícono y las animaciones de una BASE existente del juego. Subir modelos 3D o íconos nuevos desde el juego no está disponible.</p><div class="ncform">'+
+      sel("type","Tipo",ITEM_TYPES)+(ed.type==="weapon"||ed.type==="armor"?sel("cls","Clase",Object.keys(CLASSES).map(function(c){return [c,CLASSES[c].name]})):"")+sel("base","Base (apariencia)",baseOptions(ed.type,ed.type==="weapon"||ed.type==="armor"?ed.cls:null))+
+      f("name","Nombre",'maxlength="40"')+f("desc","Descripción",'maxlength="200"')+sel("rar","Rareza",RARS.map(function(r,i){return [i,r.n]}))+f("lvl","Nivel",'type="number" min="1" max="200"')+
+      (ed.type==="weapon"?f("power","Ataque",'type="number" min="0" max="5000"')+f("spd","Velocidad de ataque",'type="number" min="0.2" max="3" step="0.05"')+f("crit","Crítico %",'type="number" min="0" max="100"')+f("hp","Vida extra",'type="number" min="0" max="50000"'):"")+
+      (ed.type==="armor"?f("def","Defensa",'type="number" min="0" max="5000"')+f("hp","Vida",'type="number" min="0" max="50000"'):"")+
+      (ed.type==="potion"?f("heal","Cura (fracción de vida 0-1)",'type="number" min="0" max="1" step="0.05"')+f("mana","Maná (fracción 0-1)",'type="number" min="0" max="1" step="0.05"'):"")+
+      f("v","Valor en oro",'type="number" min="0" max="10000000"')+f("dropTxt","Drop (monstruo:%, …)",'placeholder="slime:2, lobo:1.5"')+'</div>'+
+      '<div class="row"><button class="act" data-ncit="save">Guardar borrador</button><button class="act" data-ncit="savepub">Guardar y publicar</button><button class="mini" data-ncit="new">Nuevo</button><button class="mini" data-ncit="prev">Vista previa</button></div><div id="ncItPrev"></div>'+
+      '<p class="hint">Los objetos publicados aparecen en el botín de los monstruos indicados y se pueden probar con «Probar (darme)». El inventario en línea todavía no se guarda en el servidor: lo que se obtiene dura la sesión.</p>';
+    return h;
+  }
+  function itemDef(){var e=NCMP.itemEd,o={type:e.type,base:e.base,name:String(e.name||"").trim(),desc:String(e.desc||""),rar:+e.rar||0,lvl:+e.lvl||1,v:+e.v||0,status:e.status||"draft",drop:{}};
+    if(e.type==="weapon"||e.type==="armor")o.cls=e.cls;
+    if(e.type==="weapon"){o.power=+e.power||0;o.spd=+e.spd||1;o.crit=+e.crit||0;o.hp=+e.hp||0}
+    if(e.type==="armor"){o.def=+e.def||0;o.hp=+e.hp||0;o.slot=e.base}
+    if(e.type==="potion"){o.heal=+e.heal||0;o.mana=+e.mana||0}
+    String(e.dropTxt||"").split(",").forEach(function(p){var m=/^\s*([A-Za-z0-9_]+)\s*:\s*([0-9.]+)\s*$/.exec(p);if(m&&DEFS[m[1]])o.drop[m[1]]=Math.min(100,+m[2])});
+    return o}
+  /* objeto real del juego a partir de la definición (misma forma que los del juego) */
+  function makeCustom(id,d){
+    var cls=d.cls||S.cls,lvl=d.lvl||1,it;
+    if(d.type==="weapon"){var wt=(WTYPES[cls]||[]).filter(function(w){return w.k===d.base})[0]||(WTYPES[cls]||[])[0];
+      it={t:"w",wt:wt.k,n:d.name,rar:d.rar,power:d.power,spd:d.spd||wt.spd,cls:cls,v:d.v||1,cid:id};
+      if(d.crit||d.hp)it.ex=d.crit?{crit:d.crit}:{hp:d.hp};return it}
+    if(d.type==="armor"){var idx=Math.max(0,SLOTS.map(function(s){return s.k}).indexOf(d.slot||d.base)),set=SETS.filter(function(q){return q.cls===cls})[0];
+      it=buildArmor(set,idx,d.rar,lvl);it.n=d.name;it.def=d.def;it.hp=d.hp;it.v=d.v||it.v;it.cid=id;return it}
+    return {t:"i",id:id,q:1};
+  }
+  function registerItems(){
+    var IT=CFG.all.ITEMS||{},k,d,b;
+    for(k in IT){d=IT[k];if(d.type!=="potion"&&d.type!=="mat")continue;b=ITEMS[d.base];if(!b)continue;
+      var o={};for(var q in b)o[q]=b[q];o.n=d.name;o.d=d.desc||b.d;o.rar=d.rar;o.v=d.v||b.v;if(d.type==="potion"){o.hp=d.heal||0;o.mp=d.mana||0;if(!o.hp)delete o.hp;if(!o.mp)delete o.mp}ITEMS[k]=o}
+  }
+  var oApplyCfg=applyCfg;
+  applyCfg=function(){oApplyCfg();registerItems()};
+  /* drops de los objetos publicados (independientes del botín normal del monstruo) */
+  var rollDropBase=rollDrop;
+  rollDrop=function(kind){
+    var first=rollDropBase(kind),IT=CFG.all.ITEMS||{};
+    for(var id in IT){var d=IT[id];if(d.status!=="pub"||!d.drop||!d.drop[kind])continue;if(Math.random()*100<d.drop[kind]){var x=makeCustom(id,d);if(first)lootExtra.push(x);else first=x}}
+    return first;
+  };
+  /* ---- eventos del panel en línea ---- */
   $("#admWin").addEventListener("change",function(ev){
-    var t=ev.target;if(!t||!t.classList||!t.classList.contains("ncin"))return;
-    var sec=t.dataset.ncs,path=t.dataset.ncp.split("."),v=Number(t.value),mn=+t.min,mx=+t.max;
-    if(!isFinite(v)){toast("Valor inválido");return}v=Math.max(mn,Math.min(mx,v));
-    if(path.length===1)cfgSet(sec,path[0],v);
-    else{var cur=sec==="LOOT"?LOOTC()[path[0]]:{};var o={};for(var q in cur)o[q]=cur[q];o[path[1]]=v;cfgSet(sec,path[0],o)}
+    var t=ev.target;if(!t)return;
+    if(t.classList&&t.classList.contains("ncin")){
+      var sec=t.dataset.ncs,path=t.dataset.ncp.split("."),v=Number(t.value),mn=+t.min,mx=+t.max;
+      if(!isFinite(v)){toast("Valor inválido");return}v=Math.max(mn,Math.min(mx,v));
+      if(sec==="PARTY"&&path[0]==="on"&&v===0&&!window.ncConfirmOff){t.value=1;window.ncConfirmOff=1;toast("Para deshabilitar los grupos, cambialo otra vez a 0 (se disuelven los actuales).");setTimeout(function(){window.ncConfirmOff=0},6000);return}
+      if(path.length===1)cfgSet(sec,path[0],v);
+      else{var cur=sec==="LOOT"?LOOTC()[path[0]]:{};var o={};for(var q in cur)o[q]=cur[q];o[path[1]]=v;cfgSet(sec,path[0],o)}
+      return;
+    }
+    if(t.id==="ncGmCol"){cfgSet("GM","col",t.value);return}
+    if(t.id==="ncSimK"){NCMP.simKind=t.value;return}
+    if(t.dataset&&t.dataset.ncie){var k=t.dataset.ncie;NCMP.itemEd[k]=t.value;if(k==="type"||k==="cls"){NCMP.itemEd.base="";renderAdmin()}}
   });
-
+  $("#admWin").addEventListener("click",function(ev){
+    var b=ev.target.closest&&ev.target.closest("button");if(!b)return;
+    if(b.dataset.ncz){NCMP.admZone=b.dataset.ncz;renderAdmin();return}
+    if(b.dataset.ncgmcol){cfgSet("GM","col",b.dataset.ncgmcol);return}
+    if(b.dataset.ncsim){var k=(document.getElementById("ncSimK")||{}).value||NCMP.simKind;NCMP.simKind=k;NCMP.simRes=simulate(k);renderAdmin();return}
+    if(b.dataset.nclog){NCMP.logReq=0;send({t:"adm_log",n:60});return}
+    if(b.dataset.ncrest){if(b.dataset.armed!=="1"){b.dataset.armed="1";b.textContent="¿Seguro? Click para confirmar";return}send({t:"adm_restore",id:+b.dataset.ncrest});toast("Restauración enviada");setTimeout(function(){send({t:"adm_log",n:60})},400);return}
+    var a=b.dataset.ncit;if(!a)return;
+    var IT=CFG.all.ITEMS||{},id=b.dataset.id,d=id&&IT[id];
+    function put(i,def){NCMP.staffSent=NCMP.staffSent||{};NCMP.staffSent.ITEMS=1;send({t:"adm_set",s:"ITEMS",k:i,v:JSON.stringify(def)})}
+    function edFrom(i,x,copy){var e={};for(var q in x)e[q]=x[q];e.id=copy?null:i;e.base=x.type==="armor"?(x.slot||x.base):x.base;e.dropTxt=Object.keys(x.drop||{}).map(function(m){return m+":"+x.drop[m]}).join(", ");if(copy){e.name=x.name+" (copia)";e.status="draft"}NCMP.itemEd=e}
+    if(a==="edit"&&d){edFrom(id,d,false);renderAdmin();return}
+    if(a==="dup"&&d){edFrom(id,d,true);renderAdmin();return}
+    if(a==="new"){NCMP.itemEd=null;renderAdmin();return}
+    if(a==="pub"&&d){var o={};for(var q in d)o[q]=d[q];o.status="pub";put(id,o);return}
+    if(a==="off"&&d){var o2={};for(var q2 in d)o2[q2]=d[q2];o2.status="off";put(id,o2);return}
+    if(a==="del"&&d){if(b.dataset.armed!=="1"){b.dataset.armed="1";b.textContent="¿Borrar? Confirmar";return}put(id,null);return}
+    if(a==="give"&&d){var it=makeCustom(id,d);var ok=it.t==="i"?invAddItem(id,1):invAddWeapon(it);toast(ok?"Agregado a tu mochila (prueba): "+d.name:"Mochila llena");return}
+    if(a==="prev"){var dv=itemDef();var x=document.getElementById("ncItPrev");if(!x)return;
+      if(!dv.name){x.innerHTML='<p class="hint">Poné un nombre.</p>';return}
+      registerItemsPreview(dv);var pi=makeCustom("ci_preview",dv);try{var inf=itemInfo(pi);x.innerHTML='<div class="fres ok"><b>'+inf.n+'</b><br>'+(inf.tag||"")+'<br>'+(inf.d||"")+'</div>'}catch(e){x.innerHTML='<div class="fres ok"><b>'+esc(dv.name)+'</b> · '+esc(RARS[dv.rar].n)+'</div>'}return}
+    if(a==="save"||a==="savepub"){
+      var def=itemDef();if(!def.name){toast("Poné un nombre");return}if(a==="savepub")def.status="pub";
+      var nid=NCMP.itemEd.id||("ci_"+def.name.toLowerCase().normalize("NFD").replace(/[^a-z0-9]+/g,"_").replace(/^_|_$/g,"").slice(0,18)+"_"+Math.random().toString(36).slice(2,6));
+      if(!/^ci_[a-z0-9_]{1,24}$/.test(nid))nid="ci_"+Math.random().toString(36).slice(2,10);
+      put(nid,def);NCMP.itemEd.id=nid;NCMP.itemEd.status=def.status;toast("Enviado al servidor: "+def.name);return;
+    }
+  });
+  function registerItemsPreview(d){if(d.type!=="potion"&&d.type!=="mat")return;var b=ITEMS[d.base];if(!b)return;var o={};for(var q in b)o[q]=b[q];o.n=d.name;o.d=d.desc||b.d;o.rar=d.rar;ITEMS.ci_preview=o}
+  (function(){var st=document.createElement("style");st.textContent=".ncnav .ncs{margin-top:-4px}.ncnav .tab.mini{font-size:11px;padding:3px 9px}.ncform{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;margin:6px 0}.ncf{display:flex;flex-direction:column;font-size:12px;gap:3px}.ncf input,.ncf select{width:100%}";document.head.appendChild(st)})();
+  /* ===== Alpha · menú de Gráficos (por jugador, se guarda en este navegador; no toca el servidor ni el gameplay) =====
+     Cada opción está conectada a algo que el motor REALMENTE usa:
+     - Pantalla: pantalla completa / ventana (API del navegador). Resolución interna (escala de render del motor, DRS).
+     - Calidad general: el nivel de calidad del juego (texturas, detalle del suelo, ambiente) y la optimización LOD.
+     - Texturas: texturas de superficie (GFX.tex) y filtrado al escalar (suavizado del canvas).
+     - Sombras e iluminación: sombras de personajes y monstruos; niebla y corrección de color (GL.fog, GL.grade).
+     - Partículas y efectos: cantidad de partículas de golpes y alas (0 = sin partículas); distancia de efectos completos.
+     - Distancia de dibujo: monstruos y objetos del entorno más allá de esa distancia no se dibujan.
+     - Modelos: personajes con esqueleto detallado o simple; monstruos con modelo o simple.
+     - Rendimiento: límite de FPS (30/60/90/120/sin límite).
+     No se ofrecen (el navegador o el motor no los tienen): ventana sin bordes, monitor, frecuencia, V-Sync (el navegador
+     siempre sincroniza), bloom, motion blur, profundidad de campo, oclusión ambiental. */
+  var GFX_KEY="nc_gfx_v1";
+  var GFX_DEF={prof:"alta",q:2,lod:1,res:0,tex:1,smooth:"high",shadow:1,fog:1,grade:1,part:1,fxd:420,dist:0,rig:1,mon:1,fps:0};
+  var GFX_PROF={
+    muybaja:{q:0,lod:1,res:3,tex:0,smooth:"low",shadow:0,fog:0,grade:0,part:0,fxd:200,dist:1100,rig:0,mon:0,fps:30},
+    baja:{q:0,lod:1,res:2,tex:0,smooth:"low",shadow:1,fog:0,grade:0,part:.4,fxd:260,dist:1500,rig:1,mon:0,fps:60},
+    media:{q:1,lod:1,res:1,tex:0,smooth:"medium",shadow:1,fog:1,grade:1,part:.7,fxd:340,dist:2200,rig:1,mon:1,fps:60},
+    alta:{q:2,lod:1,res:0,tex:1,smooth:"high",shadow:1,fog:1,grade:1,part:1,fxd:420,dist:0,rig:1,mon:1,fps:0},
+    ultra:{q:2,lod:0,res:0,tex:1,smooth:"high",shadow:1,fog:1,grade:1,part:1,fxd:900,dist:0,rig:1,mon:1,fps:0}
+  };
+  var GG=null,GGedit=null;
+  function gLoad(){var o={},k;for(k in GFX_DEF)o[k]=GFX_DEF[k];try{var v=JSON.parse(localStorage.getItem(GFX_KEY)||"null");if(v)for(k in GFX_DEF)if(v[k]!==undefined)o[k]=v[k]}catch(e){}return o}
+  function gSave(o){try{localStorage.setItem(GFX_KEY,JSON.stringify(o))}catch(e){}}
+  function gApply(o){
+    GG=o;
+    try{gqApply(Math.max(0,Math.min(2,o.q|0)))}catch(e){}
+    PERF.lod=o.lod?1:0;PERF.pre=PERF.lod;
+    GFX.tex=o.tex&&o.q>=1?1:0;GFX.rig=o.rig?1:0;GFX.mon=o.mon?1:0;
+    GL.fog=o.fog?1:0;GL.grade=o.grade?1:0;
+    FX98.near=Math.max(100,+o.fxd||420);
+    DRS.on=false;var ri=Math.max(0,Math.min(DRS.lv.length-1,o.res|0));DRS.i=-1;drsSet(ri);
+    try{resize()}catch(e){}
+  }
+  /* sombras: el motor dibuja la sombra de cada figura con shadow(); apagadas no se dibujan */
+  var oShadow=shadow;shadow=function(){if(GG&&!GG.shadow)return;return oShadow.apply(this,arguments)};
+  /* partículas: cantidad de los estallidos de golpe (hitBurst) y de las alas (wpPush) */
+  var oBurst=hitBurst;hitBurst=function(wx,wy,col,n,heavy){if(GG&&GG.part<1){n=Math.round((n||0)*GG.part);if(n<=0)return}return oBurst.call(this,wx,wy,col,n,heavy)};
+  var oWp=wpPush;wpPush=function(){if(GG&&GG.part<1&&Math.random()>GG.part)return;return oWp.apply(this,arguments)};
+  /* filtrado de texturas y distancia de dibujo (monstruos y entorno): se aplican en cada cuadro */
+  var oDraw=draw,dcache={t:0,list:null,src:null};
+  draw=function(){
+    if(!GG||!R)return oDraw.apply(this,arguments);
+    ctx.imageSmoothingEnabled=GG.smooth!=="off";try{ctx.imageSmoothingQuality=GG.smooth==="off"?"low":GG.smooth}catch(e){}
+    if(!GG.dist||R.scene!=="world")return oDraw.apply(this,arguments);
+    var d2=GG.dist*GG.dist,en=R.enemies,dc=decor,now=performance.now();
+    if(now-dcache.t>400||dcache.src!==dc){dcache.t=now;dcache.src=dc;dcache.list=dc.filter(function(o){var dx=o.x-R.x,dy=o.y-R.y;return dx*dx+dy*dy<=d2*1.3})}
+    R.enemies=en.filter(function(e){var dx=e.x-R.x,dy=e.y-R.y;return dx*dx+dy*dy<=d2});decor=dcache.list;
+    try{return oDraw.apply(this,arguments)}finally{R.enemies=en;decor=dc}
+  };
+  /* límite de FPS: se saltean cuadros del bucle del juego (update + dibujo) */
+  var oLoop=loop,lastF=0;
+  loop=function(ts){
+    if(GG&&GG.fps>0&&ts-lastF<1000/GG.fps-1.5){requestAnimationFrame(loop);return}
+    lastF=ts;return oLoop.apply(this,arguments);
+  };
+  /* ventana */
+  (function(){
+    var w=document.createElement("div");w.className="win";w.id="ncGfxWin";w.hidden=true;w.setAttribute("role","dialog");w.setAttribute("aria-label","Gráficos");
+    w.innerHTML='<div class="wh"><h2>Gráficos</h2><button class="x" data-close="ncGfxWin" aria-label="Cerrar">×</button></div><div class="wb" id="ncGfxBody"></div>';
+    document.body.appendChild(w);
+    var st=document.createElement("style");st.textContent="#ncGfxWin{width:min(640px,calc(100vw - 24px))}#ncGfxBody h3{margin:12px 0 4px}#ncGfxBody .prm select,#ncGfxBody .prm input{min-width:120px}.ncGfxAct{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}";document.head.appendChild(st);
+    var gb=document.getElementById("gqBtn");
+    if(gb){gb.addEventListener("click",function(e){e.stopImmediatePropagation();e.preventDefault();openGfx()},true);gb.textContent="Gráficos…"}
+  })();
+  function openGfx(){GGedit=JSON.parse(JSON.stringify(GG||gLoad()));renderGfx();openWin("ncGfxWin")}
+  function gsel(k,lab,opts,hint){return '<div class="prm"><div><b>'+lab+'</b>'+(hint?'<small>'+hint+'</small>':'')+'</div><div class="pin"><select data-gk="'+k+'">'+opts.map(function(o){return '<option value="'+o[0]+'"'+(String(GGedit[k])===String(o[0])?" selected":"")+'>'+o[1]+'</option>'}).join("")+'</select></div></div>'}
+  function renderGfx(){
+    var b=document.getElementById("ncGfxBody");if(!b)return;var fs=!!document.fullscreenElement;
+    var on=[[1,"Sí"],[0,"No"]];
+    b.innerHTML='<p class="hint">Preferencias de ESTA computadora (no cambian el servidor ni a los demás jugadores). Se guardan y se recuperan al volver a entrar.</p>'+
+      '<h3>1. Pantalla</h3>'+'<div class="prm"><div><b>Modo</b><small>Pantalla completa o ventana del navegador.</small></div><div class="pin"><button class="mini" data-gfs="1">'+(fs?"Pasar a ventana":"Pantalla completa")+'</button></div></div>'+
+      gsel("res","Resolución interna",[[0,"100 %"],[1,"90 %"],[2,"80 %"],[3,"70 %"]],"Menos = más FPS (la imagen se escala).")+
+      '<h3>2. Calidad general</h3>'+gsel("prof","Perfil",[["muybaja","Muy baja"],["baja","Baja"],["media","Media"],["alta","Alta"],["ultra","Ultra"],["pers","Personalizada"]],"Al elegir un perfil se ajustan todas las opciones; después podés cambiar cada una.")+
+      gsel("q","Nivel de detalle",[[0,"Bajo"],[1,"Medio"],[2,"Alto"]],"Detalle del suelo, ambiente y resolución máxima.")+gsel("lod","Optimización de dibujo (LOD)",on,"Simplifica lo lejano y los efectos fuera de la acción.")+
+      '<h3>3. Texturas</h3>'+gsel("tex","Texturas de superficie",[[1,"Altas"],[0,"Bajas"]],"Requiere nivel de detalle Medio o Alto.")+gsel("smooth","Filtrado al escalar",[["high","Alto"],["medium","Medio"],["low","Bajo"],["off","Sin filtrado (pixelado)"]])+
+      '<h3>4. Sombras e iluminación</h3>'+gsel("shadow","Sombras de personajes y monstruos",on)+gsel("fog","Niebla ambiental",on)+gsel("grade","Corrección de color",on)+
+      '<h3>5. Partículas y efectos</h3>'+gsel("part","Partículas (golpes, alas)",[[1,"Todas"],[.7,"70 %"],[.4,"40 %"],[0,"Ninguna"]],"Menos partículas = combates multitudinarios más fluidos.")+
+      gsel("fxd","Distancia de efectos completos",[[200,"Corta"],[340,"Media"],[420,"Normal"],[900,"Lejana"]])+
+      '<h3>6. Distancia de dibujo</h3>'+gsel("dist","Monstruos y objetos del entorno",[[0,"Sin límite"],[2200,"Lejana"],[1500,"Media"],[1100,"Corta"]],"Lo que está más lejos no se dibuja.")+
+      gsel("rig","Personajes",[[1,"Modelo detallado"],[0,"Modelo simple"]])+gsel("mon","Monstruos",[[1,"Modelo detallado"],[0,"Modelo simple"]])+
+      '<h3>7. Postprocesado</h3><p class="hint">Corrección de color y niebla (sección 4). Bloom, motion blur y profundidad de campo no existen en este motor: no se muestran.</p>'+
+      '<h3>8. Rendimiento</h3>'+gsel("fps","Límite de FPS",[[30,"30"],[60,"60"],[90,"90"],[120,"120"],[0,"Sin límite"]],"V-Sync: el navegador siempre sincroniza con la pantalla.")+
+      '<div class="ncGfxAct"><button class="act" data-gact="apply">Aplicar</button><button class="mini" data-gact="cancel">Cancelar</button><button class="mini" data-gact="def">Restaurar valores predeterminados</button></div>';
+  }
+  document.getElementById("ncGfxWin").addEventListener("change",function(ev){
+    var t=ev.target,k=t&&t.dataset&&t.dataset.gk;if(!k)return;
+    var v=t.value;if(k!=="prof"&&k!=="smooth")v=Number(v);
+    if(k==="prof"){GGedit.prof=v;if(GFX_PROF[v])for(var q in GFX_PROF[v])GGedit[q]=GFX_PROF[v][q];renderGfx()}
+    else{GGedit[k]=v;GGedit.prof="pers"}
+    gApply(GGedit);                                                     /* vista previa al instante */
+  });
+  document.getElementById("ncGfxWin").addEventListener("click",function(ev){
+    var b=ev.target.closest&&ev.target.closest("button");if(!b)return;
+    if(b.dataset.gfs){try{if(document.fullscreenElement)document.exitFullscreen();else document.documentElement.requestFullscreen()}catch(e){toast("Este navegador no permite pantalla completa")}setTimeout(renderGfx,300);return}
+    var a=b.dataset.gact;if(!a)return;
+    if(a==="apply"){gSave(GGedit);gApply(GGedit);toast("Gráficos aplicados y guardados");closeWin("ncGfxWin")}
+    else if(a==="cancel"){gApply(gLoad());closeWin("ncGfxWin")}
+    else if(a==="def"){GGedit=JSON.parse(JSON.stringify(GFX_DEF));gApply(GGedit);renderGfx()}
+  });
+  NCMP.gfx={apply:gApply,load:gLoad,cur:function(){return GG}};
+  setTimeout(function(){try{gApply(gLoad())}catch(e){mpLog("gfx "+e.message)}},0);
   NCMP.cfgAll=function(){return CFG.all};
   window.__mp=NCMP;                                                     /* para las pruebas y la consola */
   NCMP.connect=connect;NCMP.send=send;
