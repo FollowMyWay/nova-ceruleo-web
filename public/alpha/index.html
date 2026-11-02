@@ -17676,7 +17676,16 @@ function loop(ts){
     /* Alpha: el jugador murió (combate local): el servidor lo lleva al punto de reaparición del juego
        (world.respawn de shared/, no una posición del cliente). */
     respawn: {},
-    leave: {}
+    leave: {},
+    /* Alpha · grupos (en el mundo): invitar por nombre de personaje, aceptar, rechazar, salir, expulsar (líder). */
+    party_invite: { name: 'str:64' },
+    party_accept: {},
+    party_decline: {},
+    party_leave: {},
+    party_kick: { id: 'int' },
+    /* Alpha · panel ADM global (solo OWNER/ADMIN, rol del servidor): sección, campo ('' = toda la sección) y valor
+       en JSON. El servidor valida, guarda y difunde a todos (cfg). */
+    adm_set: { s: 'str:16', k: 'str:32', v: 'str:3800' }
   };
   /* Mensajes servidor -> cliente (documentación; el servidor los arma con make()).
      M2.1: auth {account {id, user, role}, token?} (token solo al registrarse o ingresar; se entrega una vez),
@@ -17685,11 +17694,17 @@ function loop(ts){
     'chars',                                     // M2.2: chars {list [{id, name, cls, lvl}], created?, deleted?}
     'enter', 'snap', 'spawn', 'despawn', 'left'];   // M2.3: enter {me, zone, tick, snap, w, h}; snap {k, ack, e [[id, x, y]]};
                                                   // spawn {e {id, name, cls, lvl, x, y}}; despawn {id, why}; left {}
+  S2C.push('ok',                                  // Alpha: ok {q} (operación aceptada)
+    'cfg',                                        // cfg {v, all} al ingresar; cfg {v, s, val} en cada cambio
+    'party', 'party_inv', 'party_dec', 'party_off');
   /* Errores de cuentas (no suman al control de abuso del protocolo). */
   var AUTH_ERRORS = ['registration_closed', 'bad_username', 'bad_email', 'weak_password', 'user_taken', 'email_taken',
     'bad_credentials', 'banned', 'too_many', 'busy', 'bad_token', 'auth_unavailable', 'server_error'];
   /* Errores de personajes y mundo (M2.2/M2.3; tampoco suman al control de abuso). */
-  var GAME_ERRORS = ['bad_name', 'name_taken', 'bad_class', 'too_many_chars', 'no_char', 'name_mismatch', 'game_unavailable'];
+  var GAME_ERRORS = ['bad_name', 'name_taken', 'bad_class', 'too_many_chars', 'no_char', 'name_mismatch', 'game_unavailable',
+    // Alpha: grupos y configuración global
+    'party_disabled', 'not_found', 'already_in_party', 'not_leader', 'party_full', 'no_invite', 'not_in_party',
+    'forbidden', 'bad_section', 'bad_value', 'cfg_too_big'];
 
   /* Códigos de cierre propios (4000-4999 reservados para aplicaciones). */
   var CLOSE = {
@@ -17795,6 +17810,7 @@ if(NCMP.on){
   })();
   function staffUi(){
     var on=isStaff();document.body.classList.toggle("nc-staff",on);
+    if(on)admOk=true;                                                   /* rol verificado por el servidor: sin clave local */
     if(!on){try{if(winOpen("admWin"))closeWin("admWin")}catch(e){}}
   }
   var origOpenWin=openWin;
@@ -17898,7 +17914,14 @@ if(NCMP.on){
         if(m.why==="other_session"){NCMP.noRetry=true;tok(null);pause();msg("Tu cuenta ingresó desde otra conexión. Esta sesión se cerró.");el("mpBody").innerHTML="";show(true)}
         else if(m.why==="shutdown")msg("El servidor se está reiniciando. Reconectando…");
         break;
+      case"cfg":onCfg(m);break;
+      case"ok":break;
+      case"party":onParty(m);break;
+      case"party_inv":onPartyInv(m);break;
+      case"party_dec":socSys((m.name||"?")+" rechazó tu invitación.");break;
+      case"party_off":onPartyOff(m);break;
       case"err":
+        if(SOCIAL_ERR[m.code]){socSys(SOCIAL_ERR[m.code]);toast(SOCIAL_ERR[m.code]);break}
         if(m.code==="bad_token"){tok(null);NCMP.resumeWorld=false;form("login")}
         else if(NCMP.st==="authing"){if(el("mpUser"))NCMP.st=NCMP.lastForm;else form("login")}       /* conserva lo escrito */
         if(m.code==="no_char"&&NCMP.resumeWorld){NCMP.resumeWorld=false;NCMP.charId=null;send({t:"char_list"})}
@@ -17917,31 +17940,132 @@ if(NCMP.on){
     origDie();
     if(NCMP.inWorld){send({t:"respawn"});NCMP.hist.length=0;NCMP.corr={x:0,y:0};NCMP.srv={x:R.x,y:R.y};NCMP.moving=false;NCMP.lastWp=null}
   };
-  /* Menos amontonamiento en el Cementerio Maldito y la Fortaleza Rota (solo en línea): campamentos con la mitad de
-     esbirros y los monstruos sueltos repartidos por la zona, a 150 o más entre sí. */
-  CAMPS.forEach(function(c){
-    if((c.b==="cem"||c.b==="ris")&&c.comp&&!c.ncHalf){var q={};for(var k in c.comp)q[k]=Math.ceil(c.comp[k]/2);c.comp=q;c.ncHalf=true}
-  });
+  /* ===== Alpha · configuración global (panel ADM en el servidor) =====
+     El servidor guarda las secciones del panel (OPT, DROPC, DROPW, RARW, DEFV, CAMPV, ...) y las del Alpha (PARTY, LOOT,
+     MOBS) y se las manda a todos (cfg). Cada cliente parte de los valores por defecto del juego (ADM_DEF) y aplica los
+     del servidor: todos juegan con los mismos parámetros. Solo OWNER/ADMIN pueden cambiarlos; en línea no se guardan
+     en el navegador (el modo individual conserva lo suyo). La velocidad del personaje queda en 1 (la simula el servidor). */
+  var CFG={v:0,all:{}};
+  var MOBS_DEF={dens:1,sp:130,camp:.6},LOOT_DEF={qmin:1,qmax:1,wm:1,am:1,pm:1,mm:1,jm:1,
+    b0:{l:0,mul:1,minr:0},b1:{l:20,mul:1,minr:0},b2:{l:40,mul:1,minr:1}};
+  var PARTY_DEF={on:1,max:4,bonus:10,radius:1200,share:1};
+  function cfgSec(k,def){var v=CFG.all[k],o={},q;for(q in def)o[q]=def[q];if(v&&typeof v==="object")for(q in v)if(q in def)o[q]=v[q];return o}
+  function MOBS(){return cfgSec("MOBS",MOBS_DEF)}
+  function LOOTC(){var o=cfgSec("LOOT",LOOT_DEF);["b0","b1","b2"].forEach(function(b){var d=LOOT_DEF[b],v=o[b]||{};o[b]={l:+v.l||d.l,mul:v.mul==null?d.mul:+v.mul,minr:v.minr==null?d.minr:+v.minr};if(b==="b0")o[b].l=0});return o}
+  function PARTYC(){return cfgSec("PARTY",PARTY_DEF)}
+  var ADM_SECTIONS=["OPT","DROPC","DROPW","RARW","DEFV","WINGC","WINGT","PETEV","PETC","CAMPV","ITEMV","JEWB","FORGE"];
+  function onCfg(m){
+    var mobsBefore=JSON.stringify(CFG.all.MOBS||null)+JSON.stringify(CFG.all.CAMPV||null);
+    if(m.all){CFG.all=m.all||{};CFG.v=m.v||0}else if(m.s){CFG.all[m.s]=m.val;CFG.v=m.v||CFG.v}
+    applyCfg();
+    if(m.s&&NCMP.staffSent&&NCMP.staffSent[m.s]){delete NCMP.staffSent[m.s];toast("Guardado en el servidor para todos: "+m.s)}
+    if(R&&JSON.stringify(CFG.all.MOBS||null)+JSON.stringify(CFG.all.CAMPV||null)!==mobsBefore&&!m.all){
+      R.worldE=spawnWorld();if(R.scene==="world"){R.enemies=R.worldE;R.target=null}         /* nuevo reparto de monstruos */
+    }
+  }
+  function applyCfg(){
+    if(typeof ADM_DEF!=="undefined"&&ADM_DEF)admApply(ADM_DEF);
+    var o={},i;for(i=0;i<ADM_SECTIONS.length;i++)if(CFG.all[ADM_SECTIONS[i]]!=null)o[ADM_SECTIONS[i]]=CFG.all[ADM_SECTIONS[i]];
+    admApply(o);OPT.speed=1;
+    NCMP.cfgApplied=CFG.v;
+    try{if(winOpen("admWin"))renderAdmin()}catch(e){}
+  }
+  /* envío de cambios (solo personal): se compara lo que hay con lo vigente y se manda por sección o por campo
+     (cada mensaje <= 3,8 KB) */
+  var admTimer=null;
+  function admSnapOnline(){var a=admSnap(),o={};ADM_SECTIONS.forEach(function(k){if(a[k]!==undefined)o[k]=a[k]});if(o.OPT)o.OPT.speed=1;return o}
+  function admBase(k){if(CFG.all[k]!=null)return CFG.all[k];return ADM_DEF?ADM_DEF[k]:undefined}
+  function admPush(){
+    admTimer=null;if(!isStaff()||!NCMP.ws)return;
+    var cur=admSnapOnline(),n=0;NCMP.staffSent=NCMP.staffSent||{};
+    ADM_SECTIONS.forEach(function(k){
+      var a=JSON.stringify(cur[k]),b=JSON.stringify(admBase(k));if(a===undefined||a===b)return;
+      if(a.length<=3700){send({t:"adm_set",s:k,k:"",v:a});n++}
+      else for(var f in cur[k]){var va=JSON.stringify(cur[k][f]),vb=JSON.stringify((admBase(k)||{})[f]);if(va!==vb){send({t:"adm_set",s:k,k:String(f),v:va});n++}}
+      NCMP.staffSent[k]=1;
+    });
+    return n;
+  }
+  var origSaveAdmin=saveAdmin;
+  saveAdmin=function(){
+    if(!NCMP.session)return origSaveAdmin();                           /* fuera de la sesión en línea: como siempre */
+    if(!isStaff())return;                                               /* en línea nadie más guarda nada */
+    clearTimeout(admTimer);admTimer=setTimeout(admPush,450);
+  };
+  function cfgSet(s,k,v){if(!isStaff())return;NCMP.staffSent=NCMP.staffSent||{};NCMP.staffSent[s]=1;send({t:"adm_set",s:s,k:k,v:JSON.stringify(v)})}
+
+  /* ===== Alpha · reparto de monstruos en TODOS los biomas (MOBS, configurable en ADM) =====
+     dens = parte de los monstruos sueltos que aparece (0,2..1,5: más de 1 duplica algunos); sp = distancia mínima entre
+     monstruos sueltos; camp = multiplicador de esbirros por campamento. Lejos de ciudades, campamentos, agua, lava y
+     obstáculos. Cada jugador genera sus monstruos (locales), así que esto no agrega tráfico de red. */
   var origSpawnWorld=spawnWorld;
-  spawnWorld=function(){var l=origSpawnWorld();spreadMobs(l);return l};
-  function spreadMobs(list){
-    var Z={cem:[140,2160,BY+60,WH-100],ris:[GX+60,SX-110,120,GY-80]},placed=[],i,e,b,z,t,x,y,ok,j,sp=NCMP.stats.spread={moved:0,failed:0};
-    for(i=0;i<list.length;i++){e=list[i];if(e.cmp)continue;b=biomeAt(e.x,e.y);if(!Z[b])placed.push(e)}
-    for(i=0;i<list.length;i++){
-      e=list[i];if(e.cmp)continue;b=biomeAt(e.x,e.y);z=Z[b];if(!z)continue;
-      var md=150;
-      for(t=0;t<400;t++){
-        if(t===250)md=110;                                              /* zona llena: un poco menos de distancia */
-        x=rnd(z[0],z[1]);y=rnd(z[2],z[3]);
-        if(biomeAt(x,y)!==b||hazard(x,y,20)||inCamp(x,y,60)||capNear(x,y,40)||solidAt(x,y,12)||waterNear(x,y,30))continue;
-        ok=true;for(j=0;j<placed.length;j++)if(Math.abs(placed[j].x-x)<md&&Math.abs(placed[j].y-y)<md&&Math.hypot(placed[j].x-x,placed[j].y-y)<md){ok=false;break}
-        if(ok){e.x=e.hx=x;e.y=e.hy=y;break}
+  spawnWorld=function(){
+    var mb=MOBS(),bak=[];
+    CAMPS.forEach(function(c){bak.push(c.comp);if(c.comp){var q={};for(var k in c.comp)q[k]=Math.max(0,Math.round(c.comp[k]*mb.camp));c.comp=q}});
+    var l;try{l=origSpawnWorld()}finally{CAMPS.forEach(function(c,i){c.comp=bak[i]})}
+    spreadMobs(l,mb);return l;
+  };
+  function spreadMobs(list,mb){
+    var sp=NCMP.stats.spread={moved:0,failed:0,dropped:0,added:0},G={},CS=150,md=Math.max(40,+mb.sp||130),i,e,b,t,x,y;
+    function key(x,y){return Math.floor(x/CS)+","+Math.floor(y/CS)}
+    function free(x,y,d){var cx=Math.floor(x/CS),cy=Math.floor(y/CS),r=Math.ceil(d/CS),a,c,arr,j;
+      for(a=-r;a<=r;a++)for(c=-r;c<=r;c++){arr=G[(cx+a)+","+(cy+c)];if(arr)for(j=0;j<arr.length;j++)if(Math.hypot(arr[j].x-x,arr[j].y-y)<d)return false}return true}
+    function put(e){var k=key(e.x,e.y);(G[k]||(G[k]=[])).push(e)}
+    /* bordes de cada bioma (muestreo) */
+    var BB={};for(x=60;x<WW;x+=120)for(y=60;y<WH;y+=120){b=biomeAt(x,y);var q=BB[b]||(BB[b]=[1e9,1e9,-1e9,-1e9]);q[0]=Math.min(q[0],x-60);q[1]=Math.min(q[1],y-60);q[2]=Math.max(q[2],x+60);q[3]=Math.max(q[3],y+60)}
+    var loose=[];for(i=0;i<list.length;i++){e=list[i];if(e.cmp)put(e);else loose.push(e)}
+    /* densidad: menos (se quitan de forma pareja) o más (se duplican algunos) */
+    var dens=Math.max(.2,Math.min(1.5,+mb.dens||1)),keep=[];
+    for(i=0;i<loose.length;i++){if(dens>=1||((i*0.61803)%1)<dens)keep.push(loose[i]);else{loose[i].ncDrop=true;sp.dropped++}}
+    if(dens>1){var extra=Math.round(loose.length*(dens-1));for(i=0;i<extra;i++){var src=loose[i%loose.length],cp=newEnemy(src.kind,src.x,src.y,false,0);list.push(cp);keep.push(cp);sp.added++}}
+    for(i=0;i<keep.length;i++){
+      e=keep[i];b=biomeAt(e.x,e.y);var z=BB[b];if(!z||b==="town"||b==="dtown"){put(e);continue}
+      var d=md,okp=false;
+      for(t=0;t<220;t++){
+        if(t===140)d=md*.75;
+        x=rnd(z[0]+40,z[2]-40);y=rnd(z[1]+40,z[3]-40);
+        if(biomeAt(x,y)!==b||hazard(x,y,20)||inCamp(x,y,60)||capNear(x,y,60)||solidAt(x,y,12)||waterNear(x,y,30))continue;
+        if(!free(x,y,d))continue;
+        e.x=e.hx=x;e.y=e.hy=y;okp=true;break;
       }
-      if(t<400){sp.moved++;placed.push(e)}else{sp.failed++;e.ncDrop=true}  /* sin lugar libre: ese no aparece */
+      if(okp){sp.moved++;put(e)}else{sp.failed++;e.ncDrop=true}         /* sin lugar libre: ese no aparece */
     }
     for(i=list.length-1;i>=0;i--)if(list[i].ncDrop)list.splice(i,1);
     wFixSpawns(list);dgClearEnemies(list);
   }
+
+  /* ===== Alpha · reglas de botín (LOOT, editor en ADM) =====
+     Sobre lo que ya tiene el juego por monstruo (DROPC probabilidad, DROPW categorías) y las rarezas (RARW):
+     - bandas por NIVEL del monstruo (b0 desde 0, b1 y b2 desde el nivel indicado): multiplicador de probabilidad y
+       rareza mínima (0 común, 1 rara, 2 épica, 3 legendaria);
+     - multiplicadores globales por categoría (armas, armaduras, pociones, materiales, joyas);
+     - cantidad de objetos por drop (mín..máx). */
+  var lootExtra=[];
+  rollDrop=function(kind){
+    var L=LOOTC(),lv=(DEFS[kind]&&DEFS[kind].lvl)||1,bd=L.b0;if(lv>=L.b1.l)bd=L.b1;if(lv>=L.b2.l&&L.b2.l>=L.b1.l)bd=L.b2;
+    var base=DROPC[kind]==null?.3:DROPC[kind],ch=clamp(base*OPT.drop*bd.mul,0,1);
+    if(Math.random()>=ch)return null;
+    var mr=Math.max(MINRAR[kind]||0,Math.min(RARS.length-1,Math.round(bd.minr)||0));
+    function one(){
+      var w=DROPW[kind]||{w:1,a:1,p:1,m:1},ww=w.w*L.wm,wa=(w.a||0)*L.am,wj=(w.j||0)*L.jm,wp=w.p*L.pm,wm=w.m*L.mm,tot=ww+wa+wj+wp+wm;
+      if(tot<=0)return null;var v=Math.random()*tot;
+      if(v<ww)return makeWeapon(mr);v-=ww;
+      if(v<wa)return makeArmor(mr,null,null,kind);v-=wa;
+      if(v<wj)return makeJewel(mr);v-=wj;
+      if(v<wp){var pool=POTPOOL[kind]||["hp1","mp1"];return {t:"i",id:pick(pool),q:1}}
+      return MATOF[kind]?{t:"i",id:MATOF[kind],q:1}:null;
+    }
+    var n=Math.max(1,irnd(Math.max(1,Math.round(L.qmin)),Math.max(Math.round(L.qmin),Math.round(L.qmax)))),first=one();
+    for(var i=1;i<n;i++){var it=one();if(it)lootExtra.push(it)}
+    return first;
+  };
+  var origLootSpawn=lootSpawn;
+  lootSpawn=function(x,y,it,g){
+    var r=origLootSpawn(x,y,it,g);
+    while(lootExtra.length){var ex=lootExtra.shift(),a=rnd(0,6.283);origLootSpawn(x+Math.cos(a)*18,y+Math.sin(a)*18,ex)}
+    return r;
+  };
+
   showIntro=function(){$("#intro").hidden=true;if(!NCMP.ws)connect();else if(NCMP.account)send({t:"char_list"});else form("login")};
   function enter(m){
     var me=m.me;NCMP.me=me;NCMP.charId=me.id;NCMP.session=true;NCMP.resumeWorld=true;
@@ -17977,7 +18101,7 @@ if(NCMP.on){
     NCMP.stats.snaps++;
     for(var i=0;i<m.e.length;i++){
       var e=m.e[i];
-      if(e[0]===NCMP.charId){NCMP.srv={x:e[1],y:e[2],k:m.k};reconcile(e[1],e[2],now);continue}
+      if(e[0]===NCMP.charId){NCMP.srv={x:e[1],y:e[2],k:m.k};NCMP.srvT=now;reconcile(e[1],e[2],now);continue}
       var o=NCMP.peers[e[0]];if(!o)continue;
       var b=o.buf||(o.buf=[]);
       if(!b.length||st>b[b.length-1].t)b.push({t:st,x:e[1],y:e[2]});
@@ -18102,6 +18226,9 @@ if(NCMP.on){
     if(Math.hypot(R.x-fx,R.y-fy)>400*elapsed+20)NCMP.hist.length=0;    /* salto dentro del paso del juego */
     NCMP.hist.push({t:now,x:R.x,y:R.y});
     while(NCMP.hist.length&&now-NCMP.hist[0].t>1600)NCMP.hist.shift();
+    /* instantáneas con cambios: si la posición propia no llega es porque el servidor no la cambió; quieto y lejos
+       de la última posición del servidor (p. ej. un salto local) se corrige igual con esa posición */
+    if(!NCMP.moving&&NCMP.srv&&now-(NCMP.srvT||0)>250&&!NCMP.corr.x&&!NCMP.corr.y&&Math.hypot(R.x-NCMP.srv.x,R.y-NCMP.srv.y)>DEAD){NCMP.srvT=now;reconcile(NCMP.srv.x,NCMP.srv.y,now)}
     peersFrame(elapsed);
   };
 
@@ -18109,6 +18236,16 @@ if(NCMP.on){
      dibujan prestándole al dibujo su estado (posición, giro, paso, clase y equipo inicial) y se restaura todo después,
      como ya hace el juego con el cuerpo caído. El estado de animación de cada uno se guarda aparte. */
   var PK=["x","y","yaw","vs","sph","v","ac","anim","animT","stag","guard","rage","lx","ly","face","lt","target","dest","lev","levE","lw","wo","fsm","wph","pf","tn","php","hp","lvx","lvy","ldt","wp","wpT","vx"];
+  /* Guerrero (y cualquier clase) con lanza: en la pose de la lanza la mano trasera queda delante de la cara y, por el
+     orden de profundidad, tapaba el rostro entero (se veía una cabeza lisa que aparecía o no según el giro de la
+     cámara). En línea, el rostro se dibuja encima de las piezas del propio cuerpo. La 0.3.4 no cambia. */
+  if(typeof FACE95!=="undefined"&&FACE95.draw){
+    var origFace=FACE95.draw;
+    FACE95.draw=function(J,cl,mode){
+      var rp=rgPush;rgPush=function(d,fn){return rp(d+1e6,fn)};
+      try{return origFace.call(this,J,cl,mode)}finally{rgPush=rp}
+    };
+  }
   var origDrawPerson=drawPerson;
   drawPerson=function(n){
     if(!n||!n.mpPeer||!n.pS||!R||!S)return origDrawPerson(n);
@@ -18130,6 +18267,112 @@ if(NCMP.on){
     }
   };
 
+  /* ===== Alpha · grupos (Party) con el panel social del juego =====
+     El servidor decide integrantes, líder, invitaciones y bonus; el cliente usa la interfaz social que ya existe
+     (panel O, /invitar, /aceptar, /rechazar, /salir, HUD del grupo) y agrega /expulsar. El bonus de experiencia
+     (% por integrante cercano) se aplica a la XP que gana cada uno. */
+  var SOCIAL_ERR={party_disabled:"Los grupos están deshabilitados.",not_found:"No hay ningún personaje en el mundo con ese nombre.",
+    already_in_party:"Ese jugador ya está en un grupo.",not_leader:"Solo el líder del grupo puede hacer eso.",party_full:"El grupo está completo.",
+    no_invite:"La invitación ya no es válida.",not_in_party:"No estás en un grupo.",forbidden:"No tenés permiso para cambiar la configuración.",
+    bad_section:"Sección de configuración desconocida.",bad_value:"Valor de configuración inválido.",cfg_too_big:"La configuración es demasiado grande."};
+  NCMP.party=null;NCMP.partyBonus=0;
+  function onParty(m){
+    NCMP.party=m;NCMP.partyBonus=+m.bonus||0;
+    var me=null,lead="?";(m.members||[]).forEach(function(o){if(o.id===NCMP.charId)me=o;if(o.id===m.leader)lead=o.name});
+    var was=SOC.party;SOC.party={id:"p"+m.id,lead:lead,srv:m.id};
+    for(var k in NCMP.peers){var o=NCMP.peers[k];o.pt=(m.members||[]).some(function(q){return "mp"+q.id===o.id})?SOC.party.id:null}
+    if(!was)socSys("Estás en un grupo · líder "+lead+". Bonus de experiencia: +"+NCMP.partyBonus+" %.");
+    socHud(true);
+  }
+  function onPartyInv(m){
+    SOC.inv={from:m.from,pid:"srv",lead:m.from,t:Date.now(),srv:m.id};
+    socSys(m.from+" te invita a su grupo. Abrí el panel social (O) o escribí /aceptar.");toast(m.from+" te invitó a un grupo (O)");socHud(true);
+  }
+  function onPartyOff(m){
+    var why={left:"Dejaste el grupo.",kicked:"El líder te sacó del grupo.",disbanded:"El grupo se disolvió."}[m.why]||"Ya no estás en un grupo.";
+    NCMP.party=null;NCMP.partyBonus=0;SOC.party=null;for(var k in NCMP.peers)NCMP.peers[k].pt=null;socSys(why);socHud(true);
+  }
+  var oInvite=socInvite,oAccept=socAccept,oDecline=socDecline,oLeave=socLeave,oMembers=socMembers,oCheck=socCheckParty,oCmd=socCmd;
+  socInvite=function(name){if(!NCMP.inWorld)return oInvite(name);name=socClean(name,16);if(!name){socSys("Uso: /invitar nombre");return}send({t:"party_invite",name:name});socSys("Invitaste a "+name+" a tu grupo.")};
+  socAccept=function(){if(!NCMP.inWorld)return oAccept();if(!SOC.inv)return;SOC.inv=null;send({t:"party_accept"});socHud(true)};
+  socDecline=function(){if(!NCMP.inWorld)return oDecline();if(!SOC.inv)return;SOC.inv=null;send({t:"party_decline"});socHud(true)};
+  socLeave=function(){if(!NCMP.inWorld)return oLeave();if(!NCMP.party){socSys("No estás en un grupo.");return}send({t:"party_leave"})};
+  socCheckParty=function(){if(!NCMP.inWorld)return oCheck()};
+  socMembers=function(){
+    if(!NCMP.inWorld)return oMembers();
+    if(!NCMP.party)return [];
+    return (NCMP.party.members||[]).filter(function(o){return o.id!==NCMP.charId}).map(function(o){
+      var pe=NCMP.peers[o.id];return {n:o.name,l:o.lvl,c:o.cls,h:100,pt:SOC.party&&SOC.party.id,id:"mp"+o.id,near:o.near,x:pe?pe.x:o.x,y:pe?pe.y:o.y}});
+  };
+  socCmd=function(c,a){
+    if(NCMP.inWorld&&(c==="expulsar"||c==="kick")){
+      var nm=socClean(a,16).toLowerCase(),t=NCMP.party&&(NCMP.party.members||[]).filter(function(o){return o.name.toLowerCase()===nm})[0];
+      if(!t){socSys("Uso: /expulsar nombre (un integrante de tu grupo).");return}
+      send({t:"party_kick",id:t.id});return;
+    }
+    if(NCMP.inWorld&&(c==="grupo"&&!a||c==="party")){var p=NCMP.party;socSys(p?"Grupo: "+p.members.map(function(o){return o.name+(o.near?"":" (lejos)")}).join(", ")+" · bonus +"+NCMP.partyBonus+" %":"No estás en un grupo.");return}
+    return oCmd(c,a);
+  };
+  var oAddXp=addXp;
+  addXp=function(n){if(NCMP.inWorld&&NCMP.partyBonus>0)n=n*(1+NCMP.partyBonus/100);return oAddXp(n)};
+
+  /* ===== Alpha · panel ADM en línea: secciones separadas =====
+     Arriba, un aviso: los cambios valen para TODOS (servidor). Pestañas nuevas: Grupo (reglas que aplica el servidor),
+     Botín (bandas por nivel, categorías y cantidades; las probabilidades por monstruo y las rarezas siguen en Drops,
+     con su % real) y Reparto (monstruos por bioma y campamentos). */
+  var NCTABS=[["ncparty","Grupo"],["ncloot","Botín"],["ncmobs","Reparto"]];
+  var origRenderAdmin=renderAdmin;
+  renderAdmin=function(){
+    origRenderAdmin();
+    if(!NCMP.session)return;
+    var b=$("#admBody");if(!b||!admOk||!winOpen("admWin"))return;
+    var tabs=b.querySelector(".tabs");
+    if(tabs){NCTABS.forEach(function(t){var x=document.createElement("button");x.className="tab"+(admTab===t[0]?" on":"");x.dataset.atab=t[0];x.textContent=t[1];tabs.appendChild(x)})}
+    var note=document.createElement("p");note.className="hint";note.id="ncAdmNote";
+    note.innerHTML="<b>Modo en línea:</b> cada cambio se guarda en el servidor y se aplica a <b>todos</b> los jugadores conectados (y a los que entren después). "+
+      (isStaff()?"Velocidad del personaje fija en 1 (la simula el servidor).":"Solo OWNER/ADMIN pueden cambiar valores.");
+    if(tabs)tabs.parentNode.insertBefore(note,tabs.nextSibling);
+    var h="";
+    if(admTab==="ncparty"){
+      var P=PARTYC();
+      h+='<h3>Grupos (Party)</h3><p class="hint">Reglas que aplica el SERVIDOR: invitaciones, máximo de integrantes y bonus de experiencia por integrante cercano.</p><div class="tbl">'+
+        ncRow("Grupos habilitados","PARTY","on",P.on,0,1,1,"0 = no se pueden formar grupos (los actuales se disuelven).")+
+        ncRow("Máximo de integrantes","PARTY","max",P.max,2,8,1,"Entre 2 y 8.")+
+        ncRow("Bonus de experiencia (% por integrante)","PARTY","bonus",P.bonus,0,200,1,"Ej.: 10 = con 3 cerca, +20 % para cada uno.")+
+        ncRow("Distancia para el bonus","PARTY","radius",P.radius,100,5000,50,"Integrantes a esta distancia o menos cuentan como cerca.")+
+        ncRow("Exigir cercanía","PARTY","share",P.share,0,1,1,"1 = solo cuentan los cercanos; 0 = cuentan todos los del grupo.")+'</div>';
+    }else if(admTab==="ncloot"){
+      var L=LOOTC(),tot=RARS.reduce(function(a,r){return a+r.w},0)||1;
+      h+='<h3>Rareza (con los pesos de Drops)</h3><p class="hint">'+RARS.map(function(r){return '<span style="color:'+r.c+'">'+r.n+' '+(Math.round(r.w/tot*1000)/10)+' %</span>'}).join(" · ")+'</p>';
+      h+='<h3>Bandas por nivel del monstruo</h3><p class="hint">Multiplicador de la probabilidad de drop y rareza mínima (0 común, 1 rara, 2 épica, 3 legendaria).</p><div class="tbl">';
+      ["b0","b1","b2"].forEach(function(bk,i){var q=L[bk];
+        h+=(i?ncRow("Banda "+(i+1)+" · desde nivel","LOOT",bk+".l",q.l,1,200,1,""):'<div class="prm"><div><b>Banda 1 · desde nivel 0</b></div></div>')+
+          ncRow("Banda "+(i+1)+" · multiplicador de drop","LOOT",bk+".mul",q.mul,0,10,.1,"")+ncRow("Banda "+(i+1)+" · rareza mínima","LOOT",bk+".minr",q.minr,0,3,1,"")});
+      h+='</div><h3>Categorías (multiplican los pesos de cada monstruo)</h3><div class="tbl">'+
+        [["wm","Armas"],["am","Armaduras"],["pm","Pociones"],["mm","Materiales"],["jm","Joyas"]].map(function(c){return ncRow(c[1],"LOOT",c[0],L[c[0]],0,10,.1,"")}).join("")+
+        '</div><h3>Cantidad por drop</h3><div class="tbl">'+ncRow("Objetos mínimos","LOOT","qmin",L.qmin,1,5,1,"")+ncRow("Objetos máximos","LOOT","qmax",L.qmax,1,5,1,"")+'</div>'+
+        '<p class="hint">Probabilidad por monstruo, categorías por monstruo y pesos de rareza: pestaña <b>Drops</b>.</p>';
+    }else if(admTab==="ncmobs"){
+      var M=MOBS();
+      h+='<h3>Reparto de monstruos (todos los biomas)</h3><p class="hint">Se aplica al instante: todos los jugadores regeneran sus monstruos con el reparto nuevo. Los atributos de cada monstruo están en <b>Monstruos</b> y los campamentos en <b>Campamentos</b>.</p><div class="tbl">'+
+        ncRow("Densidad de monstruos sueltos","MOBS","dens",M.dens,.2,1.5,.05,"1 = normal; 0,5 = la mitad.")+
+        ncRow("Distancia mínima entre monstruos","MOBS","sp",M.sp,40,400,10,"Más alta = más repartidos.")+
+        ncRow("Esbirros por campamento (multiplicador)","MOBS","camp",M.camp,0,1.5,.05,"1 = como el juego; 0,5 = la mitad.")+'</div>';
+    }else return;
+    var wrap=document.createElement("div");wrap.innerHTML=h;b.appendChild(wrap);
+  };
+  function ncRow(label,sec,path,val,min,max,step,hint){
+    return '<div class="prm"><div><b>'+label+'</b>'+(hint?'<small>'+hint+'</small>':'')+'</div><div class="pin"><input type="number" class="ncin" data-ncs="'+sec+'" data-ncp="'+path+'" value="'+val+'" min="'+min+'" max="'+max+'" step="'+step+'"'+(isStaff()?'':' disabled')+'></div></div>';
+  }
+  $("#admWin").addEventListener("change",function(ev){
+    var t=ev.target;if(!t||!t.classList||!t.classList.contains("ncin"))return;
+    var sec=t.dataset.ncs,path=t.dataset.ncp.split("."),v=Number(t.value),mn=+t.min,mx=+t.max;
+    if(!isFinite(v)){toast("Valor inválido");return}v=Math.max(mn,Math.min(mx,v));
+    if(path.length===1)cfgSet(sec,path[0],v);
+    else{var cur=sec==="LOOT"?LOOTC()[path[0]]:{};var o={};for(var q in cur)o[q]=cur[q];o[path[1]]=v;cfgSet(sec,path[0],o)}
+  });
+
+  NCMP.cfgAll=function(){return CFG.all};
   window.__mp=NCMP;                                                     /* para las pruebas y la consola */
   NCMP.connect=connect;NCMP.send=send;
 })();
