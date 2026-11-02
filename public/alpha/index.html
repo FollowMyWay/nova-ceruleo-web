@@ -17676,6 +17676,22 @@ function loop(ts){
     /* Alpha: el jugador murió (combate local): el servidor lo lleva al punto de reaparición del juego
        (world.respawn de shared/, no una posición del cliente). */
     respawn: {},
+    /* Alpha etapa B: atacar a un monstruo del servidor (el servidor valida distancia, cadencia y calcula el daño) */
+    atk: { id: 'int' },
+    /* etapa B3: habilidad i (0..3) con los ids alcanzados ("12,40,7") y, si corresponde, el punto (lluvia, salto) */
+    skill: { i: 'int', ids: 'str:200?', x: 'num?', y: 'num?' },
+    /* etapa B4/B5: botín y mochila del servidor (por uid del objeto; el servidor valida y responde con inv) */
+    pick: { id: 'int' },
+    equip: { u: 'str:40' },
+    unequip: { u: 'str:40?', s: 'str:8?' },
+    sell: { u: 'str:40', all: 'int?' },
+    use: { u: 'str:40' },
+    drop: { u: 'str:40', all: 'int?', x: 'num?', y: 'num?' },          // soltar al suelo (x/y solo en la mazmorra)
+    buy: { id: 'str:8', n: 'int?' },                                    // pociones de la Alquimia o la Tienda
+    patk: { id: 'int', k: 'int?' },                                     // mordida de la mascota (k 1 especial, 2 área)
+    /* mazmorras: entrar (id) o salir (sin id; die=1 si cayó adentro) y avisar cada baja (tipo, oleada, élite, jefe) */
+    dg: { id: 'str:16?', die: 'int?' },
+    dkill: { k: 'str:16', w: 'int', e: 'int?', b: 'int?', x: 'num?', y: 'num?' },
     leave: {},
     /* Alpha · grupos (en el mundo): invitar por nombre de personaje, aceptar, rechazar, salir, expulsar (líder). */
     party_invite: { name: 'str:64' },
@@ -17700,7 +17716,9 @@ function loop(ts){
   S2C.push('ok',                                  // Alpha: ok {q} (operación aceptada)
     'cfg',                                        // cfg {v, all} al ingresar; cfg {v, s, val} en cada cambio
     'party', 'party_inv', 'party_dec', 'party_off',
-    'adm_log');                                   // adm_log {list [{id, at, section, field, action, who, size}]}
+    'adm_log',
+    'mspawn', 'mdespawn', 'mhit', 'mdie', 'mfx', 'phit', 'pdie', 'prog', 'pheal',
+    'loot', 'lootgone', 'inv', 'dg');   // etapa B4/B5: loot {id, x, y, it}; lootgone {id, got?, full?}; inv {inv, eq, gold, hp, maxHp, mp, maxMp, err?, dh?, dm?, sold?}   // etapa B: monstruos, golpes y progreso                                   // adm_log {list [{id, at, section, field, action, who, size}]}
   /* Errores de cuentas (no suman al control de abuso del protocolo). */
   var AUTH_ERRORS = ['registration_closed', 'bad_username', 'bad_email', 'weak_password', 'user_taken', 'email_taken',
     'bad_credentials', 'banned', 'too_many', 'busy', 'bad_token', 'auth_unavailable', 'server_error'];
@@ -17930,6 +17948,19 @@ if(NCMP.on){
       case"chars":NCMP.chars=m.list||[];if(m.created){var nm=el("mpCName");if(nm)nm.value=""}charsView();break;
       case"enter":enter(m);break;
       case"snap":onSnap(m);break;
+      case"mspawn":mobSpawn(m.m);break;
+      case"mdespawn":mobGone(m.id);break;
+      case"mhit":mobHit(m);break;
+      case"mdie":mobDie(m);break;
+      case"mfx":mobFx(m);break;
+      case"phit":playerHit(m);break;
+      case"pdie":playerDead(m);break;
+      case"prog":progress(m);break;
+      case"inv":onInv(m);break;
+      case"loot":onLoot(m);break;
+      case"lootgone":onLootGone(m);break;
+      case"dg":onDg(m);break;
+      case"pheal":if(R){R.hp=m.hp;addFloat(R.x,R.y,"+"+m.amt+" PV","#9be37a",30)}break;
       case"spawn":addPeer(m.e);break;
       case"despawn":delPeer(m.id);break;
       case"left":pause();NCMP.resumeWorld=false;send({t:"char_list"});break;
@@ -17962,8 +17993,12 @@ if(NCMP.on){
      punto de reaparición del juego (mensaje respawn: no es una posición del cliente). */
   var origDie=playerDie;
   playerDie=function(){
+    if(NCMP.inWorld&&NCMP.srvMobs){
+      if(R.scene==="world"){if(R.hp<=0)R.hp=1;return}                 /* el servidor decide la muerte (pdie): sin saltos */
+      origDie();send({t:"dg",die:1});NCMP.dgOn=null;deathLock(R.x,R.y);return;
+    }
     origDie();
-    if(NCMP.inWorld){send({t:"respawn"});NCMP.hist.length=0;NCMP.corr={x:0,y:0};NCMP.srv={x:R.x,y:R.y};NCMP.moving=false;NCMP.lastWp=null}
+    if(NCMP.inWorld&&!NCMP.srvMobs){send({t:"respawn"});NCMP.hist.length=0;NCMP.corr={x:0,y:0};NCMP.srv={x:R.x,y:R.y};NCMP.moving=false;NCMP.lastWp=null}
   };
   /* ===== Alpha · configuración global (panel ADM en el servidor) =====
      El servidor guarda las secciones del panel (OPT, DROPC, DROPW, RARW, DEFV, CAMPV, ...) y las del Alpha (PARTY, LOOT,
@@ -17985,7 +18020,7 @@ if(NCMP.on){
     if(m.all){CFG.all=m.all||{};CFG.v=m.v||0}else if(m.s){CFG.all[m.s]=m.val;CFG.v=m.v||CFG.v}
     applyCfg();
     if(m.s&&NCMP.staffSent&&NCMP.staffSent[m.s]){delete NCMP.staffSent[m.s];toast("Guardado en el servidor para todos: "+m.s)}
-    if(R&&JSON.stringify(CFG.all.MOBS||null)+JSON.stringify(CFG.all.CAMPV||null)!==mobsBefore&&!m.all){
+    if(R&&!NCMP.srvMobs&&JSON.stringify(CFG.all.MOBS||null)+JSON.stringify(CFG.all.CAMPV||null)!==mobsBefore&&!m.all){
       R.worldE=spawnWorld();if(R.scene==="world"){R.enemies=R.worldE;R.target=null}         /* nuevo reparto de monstruos */
     }
   }
@@ -18107,7 +18142,9 @@ if(NCMP.on){
       startRun();
     }
     if(R.scene!=="world")leaveDungeon(false);
-    R.enemies=R.worldE;R.target=null;R.dest=null;R.auto=false;    /* monstruos LOCALES de cada jugador (como en el modo individual) */
+    NCMP.srvMobs=!!m.mobs;NCMP.mobs={};NCMP.invOn=!!m.inv;NCMP.dgOn=null;NCMP.rsp=null;try{if(R&&R.loot)R.loot=R.loot.filter(function(l){return !l.srv})}catch(x){}
+    if(NCMP.srvMobs){R.worldE=[];if(R.scene!=="world")leaveDungeon(false);S.lvl=me.lvl;S.xp=me.xp||0;S.gold=me.gold||0}  /* etapa B: monstruos del servidor */
+    R.enemies=R.worldE;R.target=null;R.dest=null;R.auto=false;    /* sin servidor de monstruos: LOCALES de cada jugador */
     R.x=me.x;R.y=me.y;R.hp=Math.min(maxHp(),me.hp||maxHp());R.mp=Math.min(maxMp(),me.mp||maxMp());
     NCMP.srv={x:me.x,y:me.y};NCMP.moving=false;NCMP.lastDir=null;NCMP.lastWp=null;NCMP.hist.length=0;NCMP.corr={x:0,y:0};NCMP.clk=null;
     if(m.tick>0)NCMP.tickMs=1000/m.tick;if(m.snap>0)NCMP.snapMs=1000/m.snap;
@@ -18130,9 +18167,15 @@ if(NCMP.on){
     var now=performance.now(),st=m.k*NCMP.tickMs,smp=st-now;
     if(NCMP.clk==null||smp>NCMP.clk)NCMP.clk=smp;else NCMP.clk+=(smp-NCMP.clk)*0.02;
     NCMP.stats.snaps++;
+    if(m.m)for(var mi=0;mi<m.m.length;mi++){var q=m.m[mi],me=NCMP.mobs[q[0]];if(!me)continue;var bb=me.buf;if(!bb.length||st>bb[bb.length-1].t)bb.push({t:st,x:q[1],y:q[2]});if(bb.length>40)bb.splice(0,bb.length-40);
+      me.shp=q[3];if(q[3]>0&&me.dead){me.dead=false;me.dieT=0;me.x=q[1];me.y=q[2];me.buf=[{t:st,x:q[1],y:q[2]}];me.spT=.5}}
+    if(m.hp!=null&&R&&NCMP.srvMobs&&R.scene==="world"){R.hp=m.hp;if(m.mp!=null)R.mp=m.mp}
+    if(m.pos&&R&&R.scene==="world"){R.x=m.pos[0];R.y=m.pos[1];NCMP.srv={x:m.pos[0],y:m.pos[1],k:m.k};NCMP.hist.length=0;NCMP.corr={x:0,y:0}}  /* carga o salto validados */
     for(var i=0;i<m.e.length;i++){
       var e=m.e[i];
-      if(e[0]===NCMP.charId){NCMP.srv={x:e[1],y:e[2],k:m.k};NCMP.srvT=now;reconcile(e[1],e[2],now);continue}
+      if(e[0]===NCMP.charId){
+        if(NCMP.rsp){if(now<NCMP.rsp.until&&Math.hypot(e[1]-NCMP.rsp.x,e[2]-NCMP.rsp.y)>150)continue;NCMP.rsp=null}
+        NCMP.srv={x:e[1],y:e[2],k:m.k};NCMP.srvT=now;reconcile(e[1],e[2],now);continue}
       var o=NCMP.peers[e[0]];if(!o)continue;
       var b=o.buf||(o.buf=[]);
       if(!b.length||st>b[b.length-1].t)b.push({t:st,x:e[1],y:e[2]});
@@ -18222,7 +18265,7 @@ if(NCMP.on){
     /* discontinuidad: si la posición cambió fuera del paso normal (un salto local, un portal), el historial ya no
        describe un camino continuo y la próxima instantánea se compara con la posición actual */
     var h0=NCMP.hist.length?NCMP.hist[NCMP.hist.length-1]:null;
-    if(h0&&R&&Math.hypot(R.x-h0.x,R.y-h0.y)>2)NCMP.hist.length=0;
+    if(h0&&R&&Math.hypot(R.x-h0.x,R.y-h0.y)>2){NCMP.hist.length=0;NCMP.stats.clrA=(NCMP.stats.clrA||0)+1;NCMP.stats.clrAd=Math.round(Math.hypot(R.x-h0.x,R.y-h0.y))}
     var fx=R?R.x:0,fy=R?R.y:0;
     var wx=null,wy=null;
     while(real>1e-6){
@@ -18254,13 +18297,14 @@ if(NCMP.on){
       for(var i=0;i<NCMP.hist.length;i++){NCMP.hist[i].x+=ax;NCMP.hist[i].y+=ay}
       if(Math.abs(c.x)<0.05&&Math.abs(c.y)<0.05)c.x=c.y=0;
     }
-    if(Math.hypot(R.x-fx,R.y-fy)>400*elapsed+20)NCMP.hist.length=0;    /* salto dentro del paso del juego */
+    if(Math.hypot(R.x-fx,R.y-fy)>400*elapsed+20){NCMP.hist.length=0;NCMP.stats.clrB=(NCMP.stats.clrB||0)+1}    /* salto dentro del paso del juego */
     NCMP.hist.push({t:now,x:R.x,y:R.y});
     while(NCMP.hist.length&&now-NCMP.hist[0].t>1600)NCMP.hist.shift();
     /* instantáneas con cambios: si la posición propia no llega es porque el servidor no la cambió; quieto y lejos
        de la última posición del servidor (p. ej. un salto local) se corrige igual con esa posición */
     if(!NCMP.moving&&NCMP.srv&&now-(NCMP.srvT||0)>250&&!NCMP.corr.x&&!NCMP.corr.y&&Math.hypot(R.x-NCMP.srv.x,R.y-NCMP.srv.y)>DEAD){NCMP.srvT=now;reconcile(NCMP.srv.x,NCMP.srv.y,now)}
     peersFrame(elapsed);
+    mobsFrame(elapsed);
   };
 
   /* Otros jugadores con el MISMO modelo y animación que el personaje propio (drawPlayer del juego, sin cambios): se
@@ -18758,6 +18802,228 @@ if(NCMP.on){
   });
   NCMP.gfx={apply:gApply,load:gLoad,cur:function(){return GG}};
   setTimeout(function(){try{gApply(gLoad())}catch(e){mpLog("gfx "+e.message)}},0);
+  /* ===== Alpha etapa B · monstruos del SERVIDOR =====
+     El cliente dibuja los monstruos que manda el servidor (los mismos para todos) con el motor del juego: se crean con
+     newEnemy (mismo modelo, animación y sonidos), pero sin IA local (no detectan ni atacan por su cuenta: ag = -1) y
+     con posición interpolada como los demás jugadores. Golpear manda «atk»; el daño, la vida, la muerte, la XP y el
+     oro los decide el servidor (mhit, mdie, phit, pdie, prog). */
+  function mobSpawn(a){
+    if(!R||!NCMP.srvMobs)return;var id=a[0];if(NCMP.mobs[id])mobGone(id);
+    if(!DEFS[a[1]])return;
+    var e=newEnemy(a[1],a[2],a[3],false,0),sn=srvNow();
+    e.sid=id;e.srv=1;e.ag=-1;e.max=a[5];e.hp=e.shp=a[4];e.rt=1e9;e.buf=[{t:sn==null?0:sn-NCMP.snapMs*1.6,x:a[2],y:a[3]}];
+    if(a[4]<=0){e.dead=true;e.dieT=0}
+    NCMP.mobs[id]=e;R.worldE.push(e);
+  }
+  function mobGone(id){var e=NCMP.mobs[id];if(!e)return;delete NCMP.mobs[id];var i=R.worldE.indexOf(e);if(i>=0)R.worldE.splice(i,1);if(R.target===e)R.target=null}
+  function mobHit(m){var e=NCMP.mobs[m.id];if(!e)return;e.shp=m.hp;e.hp=m.hp;e.hitT=.15;
+    addFloat(e.x,e.y,m.dmg+(m.crit?"!":""),m.by===NCMP.charId?(m.crit?"#ffb454":"#ffffff"):"#9fb0d0");
+    if(m.by===NCMP.charId){try{sfx("hit")}catch(x){}}}
+  function mobDie(m){var e=NCMP.mobs[m.id];if(!e)return;if(e.dead)return;e.dead=true;e.hp=e.shp=0;e.dieT=.7;e.rt=1e9;e.aT=-1;
+    try{hitBurst(e.x,e.y,e.def.col,(e.def.cb)?32:14,true)}catch(x){}
+    if(R.target===e)R.target=null;
+    if(m.by===NCMP.charId){S.kills=(S.kills||0)+1;try{questProgress(e.kind)}catch(x){}}}
+  function mobFx(m){var e=NCMP.mobs[m.id];if(!e)return;if(m.k==="slam"){R.shake=Math.max(R.shake||0,.3);R.fx.push({k:"ring",x:e.x,y:e.y,r:150,t:0,life:.5,col:"#ff7b5b"})}}
+  function playerHit(m){if(!R)return;R.hp=m.hp;NCMP.stats.phit=(NCMP.stats.phit||0)+1;addFloat(R.x,R.y,"-"+m.dmg,"#ff6b7d");try{hitBurst(R.x,R.y,"#ff6b7d",6,false)}catch(x){}
+    var e=NCMP.mobs[m.from];if(e){e.aT=0;try{mobSnd(e,"hit")}catch(x){}}}
+  function playerDead(m){
+    if(!R)return;
+    if(!m.dg){try{origDie()}catch(x){}}else if(R.scene!=="world"){try{leaveDungeon(false)}catch(x){}}
+    deathLock(m.x,m.y);
+    R.x=m.x;R.y=m.y;R.hp=m.hp;if(m.gold!=null)S.gold=m.gold;NCMP.stats.pdie=(NCMP.stats.pdie||0)+1;NCMP.hist.length=0;NCMP.corr={x:0,y:0};NCMP.srv={x:m.x,y:m.y};NCMP.moving=false;NCMP.lastWp=null;
+  }
+  function progress(m){
+    if(!S)return;var up=m.lvl>S.lvl;
+    S.lvl=m.lvl;S.xp=m.xp;S.gold=m.gold;if(R&&R.scene==="world"){R.hp=m.hp;R.mp=Math.min(R.mp,maxMp())}
+    if(m.gxp&&R)addFloat(R.x,R.y,"+"+m.gxp+" XP","#9be37a",20);
+    if(m.ggold&&R)addFloat(R.x,R.y,"+"+m.ggold+" oro","#e2b866",34);
+    if(up&&R){R.hp=maxHp();toast("¡Subiste al nivel "+S.lvl+"!");addFloat(R.x,R.y,"NIVEL "+S.lvl,"#9be37a");try{hitBurst(R.x,R.y,"#9be37a",24,true)}catch(x){}}
+  }
+  function mobsFrame(dt){
+    if(!NCMP.srvMobs||!R||R.scene!=="world")return;
+    var sn=srvNow();if(sn==null)return;var rt=sn-NCMP.snapMs*1.6;
+    for(var k in NCMP.mobs){
+      var e=NCMP.mobs[k],b=e.buf;if(e.shp!=null)e.hp=e.shp;
+      if(!b||!b.length){e.hx=e.x;e.hy=e.y;continue}
+      var x,y;
+      if(rt<=b[0].t){x=b[0].x;y=b[0].y}
+      else if(rt>=b[b.length-1].t){x=b[b.length-1].x;y=b[b.length-1].y}
+      else{var j=b.length-2;while(j>0&&b[j].t>rt)j--;var a=b[j],c=b[j+1],f=(rt-a.t)/((c.t-a.t)||1);x=a.x+(c.x-a.x)*f;y=a.y+(c.y-a.y)*f;if(j>0)b.splice(0,j)}
+      var mv=Math.hypot(x-e.x,y-e.y)>.05;e.mv=mv;if(mv){e.wk=(e.wk||0)+dt*e.def.spd*.09;e.fl=x>e.x?1:-1}
+      e.x=x;e.y=y;e.hx=x;e.hy=y;
+    }
+  }
+  /* golpear a un monstruo del servidor: se pide el golpe; el daño lo calcula el servidor */
+  var oDmgEnemy=dmgEnemy,atkT=0;
+  dmgEnemy=function(e,base){
+    if(!e||!e.srv)return oDmgEnemy.apply(this,arguments);
+    if(NCMP.cast){if(NCMP.cast.ids.indexOf(e.sid)<0)NCMP.cast.ids.push(e.sid);return}   /* habilidad: el servidor calcula */
+    var now=performance.now();if(NCMP.skipAtk&&NCMP.skipAtk[e.sid]>now)return;          /* proyectil de una habilidad */
+    if(now-atkT<150)return;atkT=now;
+    send({t:"atk",id:e.sid});e.hitT=.1;
+  };
+  /* habilidades (etapa B3): el juego hace lo suyo (animación, efectos, enfriamiento local) y el servidor recibe la
+     habilidad con los objetivos alcanzados; valida maná, enfriamiento y geometría, y calcula el daño */
+  var oUse=useSkill;
+  useSkill=function(i){
+    if(!NCMP.srvMobs||!R||R.scene!=="world")return oUse.apply(this,arguments);
+    var c=C(),sk=c&&c.sk[i];if(!sk)return;var cd0=R.cd[i],cast={ids:[]};NCMP.cast=cast;
+    try{oUse.call(this,i)}finally{NCMP.cast=null}
+    if(!(R.cd[i]>0)||R.cd[i]===cd0)return;                               /* no se lanzó (sin objetivo, maná, etc.) */
+    var ids=cast.ids.slice(),t=R.target&&R.target.srv&&!R.target.dead?R.target:null,msg={t:"skill",i:i};
+    if(t&&(sk.type==="hit"||sk.type==="charge"||sk.type==="chain")&&ids.indexOf(t.sid)<0)ids.unshift(t.sid);
+    if(sk.type==="rain"&&t){msg.x=Math.round(t.x);msg.y=Math.round(t.y);ids=R.worldE.filter(function(e){return e.srv&&!e.dead&&Math.hypot(e.x-t.x,e.y-t.y)<sk.rad+e.r}).map(function(e){return e.sid})}
+    if(sk.type==="evade"){msg.x=Math.round(R.x*10)/10;msg.y=Math.round(R.y*10)/10}
+    msg.ids=ids.slice(0,30).join(",");
+    var until=performance.now()+800;NCMP.skipAtk=NCMP.skipAtk||{};ids.forEach(function(id){NCMP.skipAtk[id]=until});
+    send(msg);
+  };
+  var oKill=killEnemy;
+  killEnemy=function(e){if(e&&e.srv)return;return oKill.apply(this,arguments)};
+  /* ===== Alpha etapa B4/B5 · botín, mochila y equipo del SERVIDOR (y mazmorras, mascota, Alquimia) =====
+     Con el servidor de objetos (enter.inv) la mochila, el equipo y el oro son una copia del servidor: equipar, quitar,
+     vender, usar pociones, comprar, recoger y soltar son PEDIDOS; el servidor valida y responde con el estado real. */
+  function deathLock(x,y){
+    NCMP.rsp={x:x,y:y,until:performance.now()+2500};
+    NCMP.hist.length=0;NCMP.corr={x:0,y:0};NCMP.srv={x:x,y:y};NCMP.moving=false;NCMP.lastWp=null;
+    if(R){R.dest=null;R.target=null;R.auto=false;R.lootTgt=null;R.enterOnArrive=false;R.shopOnArrive=false;R.pend=null}
+    keys={};
+  }
+  function srvInv(){return !!(NCMP.inWorld&&NCMP.invOn&&S&&S.online)}
+  var clone=function(o){return o==null?o:JSON.parse(JSON.stringify(o))};
+  function onInv(m){
+    if(!S)return;NCMP.invOn=true;
+    S.inv=clone(m.inv)||[];var g=m.eq||{};S.weapon=clone(g.weapon)||null;S.arm=clone(g.arm)||{};S.jew=clone(g.jew)||{};S.wing=g.wing||null;
+    S.gold=m.gold;
+    if(R){if(R.scene==="world"){if(m.hp!=null)R.hp=m.hp;if(m.mp!=null)R.mp=m.mp}
+      else{if(m.dh)R.hp=Math.min(maxHp(),R.hp+m.dh);if(m.dm)R.mp=Math.min(maxMp(),R.mp+m.dm)}
+      if(m.dh){addFloat(R.x,R.y,"+"+m.dh+" PV","#ff9aa6",30);try{hitBurst(R.x,R.y,"#ff6b7d",12,false)}catch(x){}}
+      if(m.dm){addFloat(R.x,R.y,"+"+m.dm+" PM","#8fb0ff",30);try{hitBurst(R.x,R.y,"#5b8cff",12,false)}catch(x){}}
+      if(m.dh||m.dm)R.potCd=1}
+    if(m.bought){try{toast("Compraste "+ITEMS[m.bought].n+(m.n>1?" ×"+m.n:"")+" por "+fmtMoney(m.paid))}catch(x){}}
+    if(m.sold)toast("Vendiste por "+fmtMoney(m.sold));
+    if(m.err&&INV_ERR[m.err])toast(INV_ERR[m.err]);
+    if(invSel&&invSel.uid){var all=S.inv.concat([S.weapon]).concat(Object.values(S.arm)).concat(Object.values(S.jew));invSel=all.filter(function(x){return x&&x.uid===invSel.uid})[0]||null}
+    try{renderInv()}catch(x){}try{renderShop()}catch(x){}try{if(winOpen("npcWin"))cityRender()}catch(x){}
+  }
+  var INV_ERR={inv_full:"La mochila está llena",bad_class:"Eso es de otra clase",no_gold:"No te alcanza el dinero",full:"Ya está completo",bad_item:"Eso no se puede",not_found:"Ese objeto ya no está",dead:"Estás fuera de combate"};
+  /* equipar / quitar / vender / usar */
+  var oEquip=equipItem;equipItem=function(it){if(!srvInv())return oEquip.apply(this,arguments);if(it&&it.uid)send({t:"equip",u:it.uid})};
+  var oUnequip=unequipItem;unequipItem=function(it){if(!srvInv())return oUnequip.apply(this,arguments);
+    if(it&&it.eqWing)send({t:"unequip",s:"wing"});else if(it&&it.uid)send({t:"unequip",u:it.uid})};
+  var oSell=sellItem;sellItem=function(it,all){if(!srvInv())return oSell.apply(this,arguments);if(it&&it.uid)send({t:"sell",u:it.uid,all:all?1:0})};
+  var oConsume=consume;consume=function(idx){if(!srvInv())return oConsume.apply(this,arguments);
+    var it=S.inv[idx];if(!it||it.t!=="i")return false;var d=ITEMS[it.id];if(!d||d.kind!=="potion")return false;
+    if(R.hp<=0)return false;if(R.potCd>0){toast("Esperá un instante");return false}
+    if(d.hp&&!d.mp&&R.hp>=maxHp()-.5){toast("Tu vida ya está completa");return false}
+    if(d.mp&&!d.hp&&R.mp>=maxMp()-.5){toast("Tu maná ya está completo");return false}
+    R.potCd=1;send({t:"use",u:it.uid});return true};
+  /* Alquimia y Tienda: pociones a precio del servidor (valor × 0,8) */
+  var SHOPP=["hp1","hp2","mp1","mp2"];
+  var oBuyPrice=buyPrice;buyPrice=function(it){if(srvInv()&&it&&it.t==="i"&&SHOPP.indexOf(it.id)>=0){var o=CFG.all.OPT||{},sp=typeof o.shopPrice==="number"?o.shopPrice:1;return Math.max(1,Math.round(ITEMS[it.id].v*.8*sp))}return oBuyPrice.apply(this,arguments)};
+  var oBuy=buyItem;buyItem=function(idx){if(!srvInv())return oBuy.apply(this,arguments);
+    var e=SHOP.stock[idx];if(!e)return;if(e.it.t==="i"&&SHOPP.indexOf(e.it.id)>=0){send({t:"buy",id:e.it.id});return}
+    toast("En línea, por ahora la tienda vende pociones. Las armas y armaduras salen de los monstruos y las mazmorras.")};
+  var oCityAct=cityAct;cityAct=function(a,id){
+    if(srvInv()){var n=cityById(CITY.dlg);
+      if(n&&n.k==="alch"&&a==="buy"){send({t:"buy",id:id});return}
+      if(n&&n.k==="alch"&&a==="craft"){toast("La elaboración en línea llega en la próxima actualización. Podés comprar pociones en la pestaña Comprar.");return}
+      if(n&&n.k==="quest"&&a==="deliver"){toast("Las misiones en línea llegan en la próxima actualización.");return}
+      if(n&&n.k==="inn"&&a==="rest"){toast("En línea la vida se recupera sola en la ciudad.");return}}
+    return oCityAct.apply(this,arguments)};
+  var NOT_YET="Disponible en línea en la próxima actualización.";
+  var oForgeGo=forgeGo;forgeGo=function(){if(srvInv()){toast("Forja: "+NOT_YET);return}return oForgeGo.apply(this,arguments)};
+  var oPetEv=petEvolve;petEvolve=function(){if(srvInv()){toast("Evolución de la mascota: "+NOT_YET);return}return oPetEv.apply(this,arguments)};
+  if(typeof durRepair==="function"){var oRep=durRepair;durRepair=function(){if(srvInv()){toast("En línea el equipo no se desgasta todavía.");return false}return oRep.apply(this,arguments)}}
+  if(typeof durWear==="function"){var oWear=durWear;durWear=function(){if(srvInv())return;return oWear.apply(this,arguments)}}
+  /* botín del servidor: visible solo para quien lo ganó; recoger es un pedido */
+  var LOOTS={};
+  function onLoot(m){
+    if(!R)return;var sc=m.dg?"dungeon":"world";if(sc!==R.scene)return;
+    var lt={sc:sc,x:m.x,y:m.y,item:m.it,t:0,exp:Date.now()+118000,srv:1,sid:m.id,born:performance.now()};
+    R.loot.push(lt);LOOTS[m.id]=lt;
+    var rr=m.it.t!=="i"?m.it.rar:((ITEMS[m.it.id]||{}).rar||0);
+    if(rr>=2){toast("¡Botín "+RARS[rr].n.toLowerCase()+": "+lootName(m.it)+"!")}
+  }
+  function lootDel(lt){lt.gone=true;var i=R.loot.indexOf(lt);if(i>=0)R.loot.splice(i,1);if(R.lootTgt===lt)R.lootTgt=null;delete LOOTS[lt.sid]}
+  function onLootGone(m){
+    var lt=LOOTS[m.id];if(!lt||!R)return;
+    if(m.full){lt.pend=0;toast("Mochila llena: "+lootName(lt.item)+" queda en el suelo");return}
+    if(m.got){var nm=lootName(lt.item);toast("Recogiste: "+nm);addFloat(R.x,R.y,"+ "+nm,lt.item.t!=="i"?RARS[lt.item.rar].c:ITEMS[lt.item.id].col,44);try{lootFx(lt)}catch(x){}try{sfx("pot")}catch(x){}}
+    lootDel(lt);
+  }
+  var oLootTry=lootTry;lootTry=function(lt,manual){
+    if(!lt||!lt.srv)return oLootTry.apply(this,arguments);
+    var t=performance.now();if(!lt.pend||t-lt.pend>700){lt.pend=t;send({t:"pick",id:lt.sid})}
+    return false};
+  function lootClear(){if(!R)return;for(var k in LOOTS)if(LOOTS[k].sc==="dungeon")lootDel(LOOTS[k])}
+  /* botín más visible: haz de luz del color de la rareza y el nombre encima (también lo común) */
+  var oDrawLoot=drawLoot;drawLoot=function(lt){
+    oDrawLoot.apply(this,arguments);
+    if(!lt||!lt.srv||!lt.item)return;
+    try{var it=lt.item,rar=it.t!=="i"?it.rar:(ITEMS[it.id]||{}).rar||0,col=RARS[rar].c,p=P(lt.x,lt.y),age=(performance.now()-(lt.born||0))/1000;
+      var hh=rar>=1?120:70,g=ctx.createLinearGradient(0,p.y,0,p.y-hh);g.addColorStop(0,rgba(col,.5));g.addColorStop(1,rgba(col,0));
+      ctx.fillStyle=g;ctx.fillRect(p.x-3,p.y-hh,6,hh);
+      if(age<1.2){var k=age/1.2;ell(p.x,p.y,14+k*40,7+k*20,null,rgba(col,.8*(1-k)),2)}
+      if(Math.hypot(lt.x-R.x,lt.y-R.y)<700){var nm=lootName(it)+(it.q>1?" ×"+it.q:"");
+        ctx.save();ctx.font="600 11px system-ui,sans-serif";ctx.textAlign="center";ctx.lineWidth=3;ctx.strokeStyle="rgba(0,0,0,.75)";ctx.strokeText(nm,p.x,p.y-34);ctx.fillStyle=col;ctx.fillText(nm,p.x,p.y-34);ctx.restore()}
+    }catch(x){}
+  };
+  /* Espacio: agarra lo más cercano (camina hasta el botín si hace falta) */
+  window.addEventListener("keydown",function(ev){
+    if(ev.key!==" "||ev.repeat||!R||!S)return;var tn=ev.target&&ev.target.tagName;if(tn==="INPUT"||tn==="TEXTAREA"||tn==="BUTTON")return;
+    if(!$("#intro").hidden)return;
+    var best=null,bd=420,near=[];
+    for(var i=0;i<R.loot.length;i++){var lt=R.loot[i];if(lt.gone||lt.sc!==R.scene||!lt.item)continue;var d=Math.hypot(lt.x-R.x,lt.y-R.y);if(d<=LOOT_PICK)near.push(lt);if(d<bd){bd=d;best=lt}}
+    if(!best)return;ev.preventDefault();
+    if(near.length){near.forEach(function(lt){try{lootTry(lt,true)}catch(x){}})}else{try{lootGoto(best)}catch(x){}}
+  },true);
+  /* soltar: arrastrar un objeto de la mochila fuera de la ventana lo deja en el suelo */
+  var dragOut=null;
+  document.addEventListener("dragstart",function(ev){
+    dragOut=null;if(!srvInv())return;var b=ev.target&&ev.target.closest&&ev.target.closest("#invWin .slot[data-i]");
+    if(b){var it=S.inv[Number(b.dataset.i)];if(it&&it.uid)dragOut=it}},true);
+  document.addEventListener("dragover",function(ev){if(dragOut&&!(ev.target.closest&&ev.target.closest("#invWin")))ev.preventDefault()});
+  document.addEventListener("drop",function(ev){
+    var it=dragOut;dragOut=null;if(!it||!srvInv()||(ev.target.closest&&ev.target.closest("#invWin")))return;ev.preventDefault();
+    var m={t:"drop",u:it.uid};if(R.scene!=="world"){m.x=Math.round(R.x);m.y=Math.round(R.y)}
+    send(m);toast("Soltaste "+(it.t==="i"?ITEMS[it.id].n:it.n));
+  });
+  document.addEventListener("dragend",function(){setTimeout(function(){dragOut=null},0)});
+  /* mascota del Arquero: la mordida a un monstruo del servidor la calcula el servidor */
+  var oPetHit=petHit;petHit=function(e,mult,special){
+    if(!e||!e.srv)return oPetHit.apply(this,arguments);
+    send({t:"patk",id:e.sid,k:special?1:(mult>1?2:0)});e.hitT=.12;
+    try{hitBurst(e.x,e.y,"#8fd4ff",special?14:5,special)}catch(x){}
+  };
+  /* mazmorras: el servidor lleva la corrida y paga XP, oro y botín */
+  NCMP.dgOn=null;
+  var oEnterDg=enterDungeon;enterDungeon=function(id){
+    var r=oEnterDg.apply(this,arguments);
+    if(NCMP.inWorld&&NCMP.srvMobs){NCMP.dgOn=id||"cripta";send({t:"dg",id:NCMP.dgOn})}
+    return r};
+  var oLeaveDg=leaveDungeon;leaveDungeon=function(v){
+    var was=R&&R.scene==="dungeon";var r=oLeaveDg.apply(this,arguments);
+    if(was&&NCMP.inWorld&&NCMP.srvMobs&&NCMP.dgOn){NCMP.dgOn=null;send({t:"dg"});lootClear();
+      NCMP.hist.length=0;NCMP.corr={x:0,y:0};if(NCMP.srv){R.x=NCMP.srv.x;R.y=NCMP.srv.y}}
+    return r};
+  function onDg(m){
+    if(m.err&&R&&R.scene==="dungeon"){NCMP.dgOn=null;toast("No estás en la puerta de la mazmorra: acercate y volvé a entrar.");try{oLeaveDg(false)}catch(x){}}
+  }
+  var oKill2=killEnemy;
+  killEnemy=function(e){
+    if(!e||e.srv)return;
+    if(!(NCMP.inWorld&&NCMP.srvMobs&&R.scene==="dungeon"))return oKill2.apply(this,arguments);
+    if(e.dead)return;e.dead=true;e.rt=1e9;e.dieT=.7;e.aT=-1;
+    try{if(MOBP[e.kind])mobSnd(e,"die");else sfx("hit")}catch(x){}
+    S.kills++;if(R.target===e)R.target=null;
+    R.decals.push({sc:R.scene,x:e.x,y:e.y,r:e.r*(e.def.cb?2.2:1.25),t:0,seed:Math.random()*10,col:BLOOD[e.kind]||"#5a1018"});if(R.decals.length>60)R.decals.shift();
+    try{hitBurst(e.x,e.y,e.def.col,e.def.cb?32:14,true)}catch(x){}
+    if(e.def.cb)R.shake=Math.max(R.shake,.5);
+    if(!e.sum)send({t:"dkill",k:e.kind,w:R.wave,e:e.elite?1:0,b:e.isDB?1:0,x:Math.round(e.x),y:Math.round(e.y)});
+  };
+  var oBossLoot=dkBossLoot;dkBossLoot=function(){if(NCMP.inWorld&&NCMP.srvMobs)return;return oBossLoot.apply(this,arguments)};
+
   NCMP.cfgAll=function(){return CFG.all};
   window.__mp=NCMP;                                                     /* para las pruebas y la consola */
   NCMP.connect=connect;NCMP.send=send;
