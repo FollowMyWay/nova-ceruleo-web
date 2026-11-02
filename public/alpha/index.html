@@ -18516,7 +18516,14 @@ if(NCMP.on){
     return '<h3>Reparto de monstruos (todos los biomas)</h3><p class="hint">Se aplica al instante: todos los jugadores regeneran sus monstruos con el reparto nuevo. Los atributos están en <b>Mobs</b>. Los monstruos son locales de cada jugador: no generan tráfico de red.</p><div class="tbl">'+
       ncRow("Densidad de monstruos sueltos","MOBS","dens",M.dens,.2,1.5,.05,"1 = normal; 0,5 = la mitad.")+
       ncRow("Distancia mínima entre monstruos","MOBS","sp",M.sp,40,400,10,"Más alta = más repartidos.")+
-      ncRow("Esbirros por campamento (multiplicador)","MOBS","camp",M.camp,0,1.5,.05,"1 = como el juego; 0,5 = la mitad.")+'</div>';
+      ncRow("Esbirros por campamento (multiplicador)","MOBS","camp",M.camp,0,1.5,.05,"1 = como el juego; 0,5 = la mitad.")+'</div>'+
+      '<h3>Inteligencia de los monstruos (servidor)</h3><div class="ncg">'+
+      ncRow("IA nueva (1 = activa, 0 = la anterior)","MOBS","ai",M.ai==null?1:M.ai,0,1,1,"Patrulla, reposo, retirada, ayuda del grupo y habilidades por especie.")+
+      ncRow("Ayuda entre monstruos (multiplicador del radio)","MOBS","assist",M.assist==null?1:M.assist,0,3,.1,"0 = cada uno pelea solo.")+
+      ncRow("Retirada con poca vida (1 = sí)","MOBS","flee",M.flee==null?1:M.flee,0,1,1,"Lobos, salamandras y criaturas del desierto huyen hacia su grupo.")+
+      ncRow("Máximo de perseguidores por jugador","MOBS","chasers",M.chasers==null?8:M.chasers,1,40,1,"Los demás esperan; los jefes no cuentan.")+
+      ncRow("Patrulla (multiplicador del radio)","MOBS","patrol",M.patrol==null?1:M.patrol,0,3,.1,"0 = quietos en su lugar.")+
+      ncRow("Radio de detección (multiplicador)","MOBS","aggroM",M.aggroM==null?1:M.aggroM,.2,3,.05,"Más alto = te ven de más lejos.")+'</div>';
   }
   function admLoot(){
     var L=LOOTC(),tot=RARS.reduce(function(a,r){return a+r.w},0)||1,h='';
@@ -18826,7 +18833,13 @@ if(NCMP.on){
     try{hitBurst(e.x,e.y,e.def.col,(e.def.cb)?32:14,true)}catch(x){}
     if(R.target===e)R.target=null;
     if(m.by===NCMP.charId){S.kills=(S.kills||0)+1;try{questProgress(e.kind)}catch(x){}}}
-  function mobFx(m){var e=NCMP.mobs[m.id];if(!e)return;if(m.k==="slam"){R.shake=Math.max(R.shake||0,.3);R.fx.push({k:"ring",x:e.x,y:e.y,r:150,t:0,life:.5,col:"#ff7b5b"})}}
+  function mobFx(m){var e=NCMP.mobs[m.id];if(!e)return;
+    if(m.k==="slam"){R.shake=Math.max(R.shake||0,.3);R.fx.push({k:"ring",x:e.x,y:e.y,r:150,t:0,life:.5,col:"#ff7b5b"})}
+    else if(m.k==="dive"){R.fx.push({k:"ring",x:m.x,y:m.y,r:46,t:0,life:.6,col:"#ffd36b"});e.aT=0;try{mobSnd(e,"alert")}catch(x){}}   /* aviso de picada: marca dónde cae */
+    else if(m.k==="nova"){R.fx.push({k:"ring",x:e.x,y:e.y,r:130,t:0,life:.5,col:"#ff9a3a"});try{hitBurst(e.x,e.y,"#ff9a3a",18,true)}catch(x){}}
+    else if(m.k==="guard"){R.fx.push({k:"ring",x:e.x,y:e.y,r:e.r+10,t:0,life:1.6,col:"#9fb0d0"});addFloat(e.x,e.y,"Defensa","#9fb0d0",30)}
+    else if(m.k==="phase"){R.shake=Math.max(R.shake||0,.25);addFloat(e.x,e.y,m.n>=2?"¡FURIA!":"¡Se enfurece!","#ff5b5b",60);try{mobSnd(e,"alert")}catch(x){}}
+  }
   function playerHit(m){if(!R)return;R.hp=m.hp;NCMP.stats.phit=(NCMP.stats.phit||0)+1;addFloat(R.x,R.y,"-"+m.dmg,"#ff6b7d");try{hitBurst(R.x,R.y,"#ff6b7d",6,false)}catch(x){}
     var e=NCMP.mobs[m.from];if(e){e.aT=0;try{mobSnd(e,"hit")}catch(x){}}}
   function playerDead(m){
