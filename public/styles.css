@@ -1,0 +1,190 @@
+:root {
+  --noche: #0f1b2d;
+  --pizarra: #1b2a3f;
+  --ceruleo: #5cbfe3;
+  --laton: #c49a55;
+  --madera: #5a3d24;
+  --pergamino: #ede3cc;
+  --tinta-suave: #b8b09c;
+  --display: "IM Fell English", Georgia, serif;
+  --texto: "Alegreya Sans", system-ui, sans-serif;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+
+body {
+  margin: 0;
+  background: var(--noche);
+  color: var(--pergamino);
+  font: 400 1.125rem/1.6 var(--texto);
+  -webkit-font-smoothing: antialiased;
+}
+
+img { display: block; max-width: 100%; height: auto; }
+
+a { color: var(--ceruleo); }
+:focus-visible { outline: 3px solid var(--ceruleo); outline-offset: 3px; }
+
+.saltar {
+  position: absolute; left: 1rem; top: -4rem; z-index: 10;
+  background: var(--pergamino); color: var(--noche); padding: .5rem 1rem;
+}
+.saltar:focus { top: 1rem; }
+
+/* Portada: la plaza de Puerto Aurora y los carteles de madera del juego como navegación */
+.portada {
+  position: relative;
+  min-height: min(92vh, 760px);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 2rem;
+  padding: 2rem clamp(1rem, 5vw, 4rem) clamp(2rem, 6vw, 4.5rem);
+  overflow: hidden;
+  isolation: isolate;
+}
+.portada-fondo {
+  position: absolute; inset: 0; z-index: -1;
+  width: 100%; height: 100%; max-width: none;
+  object-fit: cover; object-position: 45% 40%;
+  filter: saturate(.85);
+}
+.portada::after {
+  content: ""; position: absolute; inset: 0; z-index: -1;
+  background:
+    linear-gradient(180deg, rgba(15,27,45,.15) 0%, rgba(15,27,45,.55) 45%, var(--noche) 100%),
+    linear-gradient(90deg, rgba(15,27,45,.85) 0%, rgba(15,27,45,0) 65%);
+}
+.portada h1 {
+  margin: 0;
+  font: 400 clamp(3.25rem, 11vw, 8.5rem)/.9 var(--display);
+  letter-spacing: -.01em;
+  color: var(--pergamino);
+  text-shadow: 0 2px 0 #000, 0 0 40px rgba(92,191,227,.35);
+}
+.bajada {
+  max-width: 34rem;
+  margin: 1.25rem 0 0;
+  font-size: clamp(1.125rem, 2.2vw, 1.375rem);
+  color: var(--pergamino);
+}
+
+.carteles { display: flex; flex-direction: column; align-items: flex-end; gap: .6rem; padding-bottom: .5rem; }
+.carteles a {
+  --corte: 1.1rem;
+  display: block;
+  min-width: 10.5rem;
+  padding: .55rem calc(var(--corte) + .9rem) .55rem 1.1rem;
+  font: 400 1.375rem/1.1 var(--display);
+  color: var(--pergamino);
+  text-decoration: none;
+  background:
+    repeating-linear-gradient(176deg, rgba(0,0,0,.0) 0 6px, rgba(0,0,0,.12) 6px 7px),
+    linear-gradient(180deg, #7a5432, var(--madera));
+  clip-path: polygon(0 0, calc(100% - var(--corte)) 0, 100% 50%, calc(100% - var(--corte)) 100%, 0 100%);
+  box-shadow: inset 0 0 0 2px rgba(196,154,85,.55);
+  transform: rotate(var(--giro, 0deg));
+  transition: transform .15s ease, background-color .15s ease;
+}
+.carteles a:nth-child(1) { --giro: -2deg; }
+.carteles a:nth-child(2) { --giro: 1.5deg; margin-right: .6rem; }
+.carteles a:nth-child(3) { --giro: -1deg; margin-right: .2rem; }
+.carteles a:hover { transform: rotate(0deg) translateX(4px); }
+@media (prefers-reduced-motion: reduce) { .carteles a { transition: none; } }
+
+/* Secciones */
+main { padding: 0 clamp(1rem, 5vw, 4rem); }
+.bloque { max-width: 68rem; margin: 0 auto; padding: clamp(3rem, 8vw, 6rem) 0 0; }
+.bloque h2 {
+  margin: 0 0 .75rem;
+  font: 400 clamp(2.25rem, 5vw, 3.25rem)/1.05 var(--display);
+  color: var(--laton);
+}
+.intro { max-width: 40rem; margin: 0 0 2.5rem; color: var(--tinta-suave); }
+
+/* Zonas */
+.zona {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
+  gap: clamp(1.25rem, 4vw, 3rem);
+  align-items: center;
+  margin-bottom: clamp(2.5rem, 6vw, 4rem);
+}
+.zona:nth-of-type(even) { grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr); }
+.zona:nth-of-type(even) img { order: 2; }
+.zona img {
+  width: 100%;
+  border: 2px solid rgba(196,154,85,.6);
+  box-shadow: 0 0 0 6px var(--pizarra);
+}
+.zona h3 { margin: 0 0 .5rem; font: 400 2rem/1.1 var(--display); }
+.zona p { margin: 0; max-width: 32rem; }
+.placa {
+  display: inline-block;
+  vertical-align: middle;
+  margin-left: .4rem;
+  padding: .1rem .55rem;
+  font: 500 .9rem/1.4 var(--texto);
+  color: var(--ceruleo);
+  border: 1px solid currentColor;
+  border-radius: 2px;
+}
+
+/* Clases */
+.clases {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 2rem clamp(2rem, 6vw, 5rem);
+  margin: 1.5rem 0 0;
+}
+.clases dt { font: 400 1.75rem/1.1 var(--display); color: var(--pergamino); }
+.clases dd { margin: .35rem 0 0; color: var(--tinta-suave); max-width: 28rem; }
+
+/* Alpha: etapas en orden */
+.etapas { list-style: none; margin: 0; padding: 0; max-width: 44rem; counter-reset: etapa; }
+.etapas li {
+  counter-increment: etapa;
+  position: relative;
+  padding: 0 0 1.5rem 3.25rem;
+  color: var(--tinta-suave);
+}
+.etapas li::before {
+  content: counter(etapa);
+  position: absolute; left: 0; top: 0;
+  width: 2.1rem; height: 2.1rem;
+  display: grid; place-items: center;
+  font: 400 1.125rem/1 var(--display);
+  border-radius: 50%;
+}
+.etapas li:not(:last-child)::after {
+  content: ""; position: absolute; left: 1.05rem; top: 2.3rem; bottom: .2rem; width: 2px;
+  background: rgba(196,154,85,.35);
+}
+.etapas .hecho::before { background: var(--laton); color: var(--noche); }
+.etapas .pendiente::before { border: 2px dashed var(--ceruleo); color: var(--ceruleo); }
+.etapas strong { display: block; font-weight: 700; color: var(--pergamino); }
+.etapas .pendiente strong { color: var(--ceruleo); }
+.nota { margin: 1rem 0 0; max-width: 40rem; color: var(--tinta-suave); font-style: italic; }
+
+.pie {
+  margin-top: clamp(4rem, 10vw, 7rem);
+  padding: 2rem clamp(1rem, 5vw, 4rem);
+  border-top: 1px solid rgba(196,154,85,.3);
+  color: var(--tinta-suave);
+  font-size: 1rem;
+}
+.pie p { max-width: 68rem; margin: 0 auto; }
+
+@media (max-width: 760px) {
+  .portada { grid-template-columns: 1fr; align-items: end; min-height: 88vh; }
+  .carteles { flex-direction: row; flex-wrap: wrap; align-items: flex-start; justify-content: flex-start; }
+  .carteles a { min-width: 0; font-size: 1.15rem; }
+  .carteles a:nth-child(n) { margin-right: 0; }
+  .zona, .zona:nth-of-type(even) { grid-template-columns: 1fr; }
+  .zona:nth-of-type(even) img { order: 0; }
+  .clases { grid-template-columns: 1fr; }
+}
+.carteles-izq { align-items: flex-start; }
