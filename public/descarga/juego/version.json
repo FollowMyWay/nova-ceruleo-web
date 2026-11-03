@@ -1,12 +1,12 @@
 {
-  "version": "2026.11.03-d09a843",
-  "commit": "d09a843fa76f93297d7df60d51cb830d8c8070db",
+  "version": "2026.11.03-2956b18",
+  "commit": "2956b18916810e307c5b6c6281d3e65f860a79c6",
   "branch": "personajes-ia2",
-  "fecha": "2026-11-03T00:41:00.129Z",
+  "fecha": "2026-11-03T01:05:40.370Z",
   "file": "NovaCeruleo.pck",
   "parts": 2,
   "part_size": 20971520,
-  "size": 37295788,
-  "sha256": "83ad141a438a5068061996383d101409c130e3496c871bbe788d244ddc104396",
-  "anterior": "e3da7b3852ee3b37c1ab03504fc7576fce8fa9ae"
+  "size": 37297948,
+  "sha256": "644856726332c5af8aa9c8f6e1696fba903cb591b6d3e6378a14e106fbf55d2e",
+  "anterior": "d09a843fa76f93297d7df60d51cb830d8c8070db"
 }
