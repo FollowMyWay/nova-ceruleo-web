@@ -1,0 +1,7 @@
+{
+  "noticias": [
+    {"fecha": "2026-11-04", "titulo": "Personajes: nueva pantalla de selección", "texto": "Elegí tu personaje viéndolo en 3D, con su clase, nivel y servidor. Borrar un personaje ahora pide confirmación y se puede recuperar durante 7 días."},
+    {"fecha": "2026-11-04", "titulo": "Arreglos: equipo, objetivos y habilidades", "texto": "Arrastrá objetos a su ranura para equiparlos (o clic derecho / doble clic). El clic sobre un monstruo lo selecciona también en las mazmorras, y las habilidades te dicen si falta objetivo o está fuera de alcance."},
+    {"fecha": "2026-11-04", "titulo": "Interfaz y controles estilo MMO clásico", "texto": "Minimapa redondo, barras de acción, chat con pestañas, inventario y personaje con el héroe en 3D. Controles W/S, A/D de costado, Q/E girar, F carrera automática y Z caminar."}
+  ]
+}
