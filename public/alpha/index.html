@@ -17665,21 +17665,22 @@ function loop(ts){
     logout: {},
     /* M2.2 (personajes, con la cuenta ingresada). Nombre y clase los valida el servidor (reglas del juego 0.3.4). */
     char_list: {},
-    char_create: { name: 'str:64', cls: 'str:16' },
+    char_create: { name: 'str:64', cls: 'str:16', look: 'str:200?' },   // look: apariencia (JSON, Etapa 4)
     char_delete: { id: 'int', name: 'str:64' },
+    char_restore: { id: 'int' },                // Etapa 2: recuperar un personaje borrado (hasta 7 días)
     /* M2.3 (mundo compartido). El cliente envía intenciones, nunca posiciones: destino {x, y}, dirección {dx, dy}
        con |d| <= 1, o {} para detenerse. El servidor simula y responde con instantáneas. */
     char_select: { id: 'int' },
     /* Alpha: q=1 agrega el destino al final del camino (puntos de paso del cliente, que el servidor recorre con su
        propia velocidad y colisión); sin q, el destino reemplaza al camino. */
-    move: { x: 'num?', y: 'num?', dx: 'num?', dy: 'num?', seq: 'int?', q: 'int?' },
+    move: { x: 'num?', y: 'num?', dx: 'num?', dy: 'num?', seq: 'int?', q: 'int?', f: 'num?' },
     /* Alpha: el jugador murió (combate local): el servidor lo lleva al punto de reaparición del juego
        (world.respawn de shared/, no una posición del cliente). */
     respawn: {},
     /* Alpha etapa B: atacar a un monstruo del servidor (el servidor valida distancia, cadencia y calcula el daño) */
     atk: { id: 'int' },
     /* etapa B3: habilidad i (0..3) con los ids alcanzados ("12,40,7") y, si corresponde, el punto (lluvia, salto) */
-    skill: { i: 'int', ids: 'str:200?', x: 'num?', y: 'num?' },
+    skill: { i: 'int', ids: 'str:200?', x: 'num?', y: 'num?', ally: 'int?' },   // Etapa 3: ally = id del personaje aliado (o propio)
     /* etapa B4/B5: botín y mochila del servidor (por uid del objeto; el servidor valida y responde con inv) */
     pick: { id: 'int' },
     equip: { u: 'str:40' },
@@ -17706,7 +17707,24 @@ function loop(ts){
     adm_set: { s: 'str:16', k: 'str:32', v: 'str:3800' },
     /* Alpha · auditoría: historial (OWNER, ADMIN, MODERATOR) y restaurar el valor anterior de un cambio (OWNER, ADMIN) */
     adm_log: { n: 'int?' },
-    adm_restore: { id: 'int' }
+    adm_restore: { id: 'int' },
+    /* Chat: general por cercanía, grupo (party) o susurro (whisper) con límites anti-spam */
+    chat: { text: 'str:140', scope: 'str:16?', to: 'str:64?' },
+    /* Forja: mejorar arma, armadura o joya (el servidor valida oro, materiales y probabilidad) */
+    forge: { u: 'str:40' },
+    /* Crafteo de Alquimia: elaborar pociones y elixires con materiales de monstruos */
+    craft: { id: 'str:8' },
+    /* Atributos: sumar puntos (cantidad por atributo; el servidor valida contra los puntos del nivel) y reiniciar con oro */
+    attr_add: { fue: 'int?', des: 'int?', int: 'int?', con: 'int?', cnc: 'int?' },
+    attr_reset: {},
+    /* Ramas y habilidades (Etapa 4): +1 rango de dominio en una rama, +1 nivel de una habilidad (id de texto de
+       shared/rules/talents.json) y reinicio total con oro. El servidor valida clase, nivel, puntos y requisitos. */
+    tal_branch: { id: 'str:32' },
+    tal_skill: { id: 'str:32' },
+    tal_reset: {},
+    /* Etapa 5: usar una habilidad de rama (id de texto). ids = monstruos alcanzados, ally = aliado, x/y = punto en el
+       suelo (Santuario). El servidor valida que esté aprendida, enfriamiento, maná y objetivo. */
+    tskill: { id: 'str:32', ids: 'str:200?', x: 'num?', y: 'num?', ally: 'int?' }
   };
   /* Mensajes servidor -> cliente (documentación; el servidor los arma con make()).
      M2.1: auth {account {id, user, role}, token?} (token solo al registrarse o ingresar; se entrega una vez),
@@ -17719,8 +17737,17 @@ function loop(ts){
     'cfg',                                        // cfg {v, all} al ingresar; cfg {v, s, val} en cada cambio
     'party', 'party_inv', 'party_dec', 'party_off',
     'adm_log',
+    'chat',
+    'forge',
+    'craft',
     'mspawn', 'mdespawn', 'mhit', 'mdie', 'mfx', 'phit', 'pdie', 'prog', 'pheal',
-    'loot', 'lootgone', 'inv', 'dg', 'quest');   // etapa B4/B5: loot {id, x, y, it}; lootgone {id, got?, full?}; inv {inv, eq, gold, hp, maxHp, mp, maxMp, err?, dh?, dm?, sold?}   // etapa B: monstruos, golpes y progreso                                   // adm_log {list [{id, at, section, field, action, who, size}]}
+    'loot', 'lootgone', 'inv', 'dg', 'quest',
+    'skr',
+    'attrs',                                     // attrs {a, eff, aff, pts, free, der, next, cost, resets, max, paid?, err?}                                       // skr {i, why}: la habilidad i fue rechazada (sin objetivo, lejos, recarga, maná)   // etapa B4/B5: loot {id, x, y, it}; lootgone {id, got?, full?}; inv {inv, eq, gold, hp, maxHp, mp, maxMp, err?, dh?, dm?, sold?}   // etapa B: monstruos, golpes y progreso                                   // adm_log {list [{id, at, section, field, action, who, size}]}
+    'fx',                                         // Etapa 3: fx {id, e: 'm'|'p', on: [{id, k, t, n}]} solo al cambiar
+    'talents',                                    // Etapa 4: talents {cls, b, s, resets, bp, bf, sp, sf, cost, lvl, max, id?, paid?, err?}
+    'tsk', 'tskr', 'psk', 'pmana',
+    'act', 'mact', 'atkr');                       // Etapa 1b: act {by, id, d, r, iv} ataque aceptado (pega en d ms; r = preparación); mact {id, tg, d, rg} un monstruo empieza su golpe; atkr {id, why, iv?} ataque rechazado               // Etapa 5: tsk {id, cd, mp, hit?, ally?, x?, y?} usada; tskr {id, why} rechazada; psk {pid, id, x?, y?} la usó otro; pmana {amt, mp, by}                                   // Etapa 4: talents {cls, b, s, resets, bp, bf, sp, sf, cost, lvl, max, id?, paid?, err?}
   /* Errores de cuentas (no suman al control de abuso del protocolo). */
   var AUTH_ERRORS = ['registration_closed', 'bad_username', 'bad_email', 'weak_password', 'user_taken', 'email_taken',
     'bad_credentials', 'banned', 'too_many', 'busy', 'bad_token', 'auth_unavailable', 'server_error'];
@@ -17728,7 +17755,10 @@ function loop(ts){
   var GAME_ERRORS = ['bad_name', 'name_taken', 'bad_class', 'too_many_chars', 'no_char', 'name_mismatch', 'game_unavailable',
     // Alpha: grupos y configuración global
     'party_disabled', 'not_found', 'already_in_party', 'not_leader', 'party_full', 'no_invite', 'not_in_party',
-    'forbidden', 'bad_section', 'bad_value', 'cfg_too_big'];
+    'forbidden', 'bad_section', 'bad_value', 'cfg_too_big', 'chat_spam', 'no_mats', 'max_level', 'bad_recipe', 'bad_look',
+    'bad_attr', 'no_points', 'no_gold', 'nothing_to_reset',
+    // Etapa 4: ramas y habilidades
+    'bad_talent', 'max_rank', 'max_skill', 'need_rank', 'need_skill'];
 
   /* Códigos de cierre propios (4000-4999 reservados para aplicaciones). */
   var CLOSE = {
@@ -17785,7 +17815,6 @@ function loop(ts){
   return { PROTO: PROTO, MAX_MSG: MAX_MSG, C2S: C2S, S2C: S2C, AUTH_ERRORS: AUTH_ERRORS, GAME_ERRORS: GAME_ERRORS, CLOSE: CLOSE, decode: decode, make: make };
 });
 
-var NCMP_DEFAULT_URL="wss://play.novaceruleo.org/ws";
 /* ===== MULTIJUGADOR M2.4 · cliente del servidor de Nova Ceruleo =====
    Se inyecta dentro del juego armado 0.3.4 (stage_mp.py) justo antes del arranque. Con la red APAGADA no hace nada:
    sin "#mp=<servidor>" en la dirección (o con "#mp=0") el juego se comporta exactamente como la 0.3.4 (no envuelve
@@ -18030,14 +18059,14 @@ if(NCMP.on){
   function applyCfg(){
     if(typeof ADM_DEF!=="undefined"&&ADM_DEF)admApply(ADM_DEF);
     var o={},i;for(i=0;i<ADM_SECTIONS.length;i++)if(CFG.all[ADM_SECTIONS[i]]!=null)o[ADM_SECTIONS[i]]=CFG.all[ADM_SECTIONS[i]];
-    admApply(o);OPT.speed=1;
+    admApply(o);OPT.speed=NCMP.spdMul||1;
     NCMP.cfgApplied=CFG.v;
     try{if(winOpen("admWin"))renderAdmin()}catch(e){}
   }
   /* envío de cambios (solo personal): se compara lo que hay con lo vigente y se manda por sección o por campo
      (cada mensaje <= 3,8 KB) */
   var admTimer=null;
-  function admSnapOnline(){var a=admSnap(),o={};ADM_SECTIONS.forEach(function(k){if(a[k]!==undefined)o[k]=a[k]});if(o.OPT)o.OPT.speed=1;return o}
+  function admSnapOnline(){var a=admSnap(),o={};ADM_SECTIONS.forEach(function(k){if(a[k]!==undefined)o[k]=a[k]});if(o.OPT)o.OPT.speed=1;return o}   /* lo que se manda al servidor: su velocidad base sigue en 1 */
   function admBase(k){if(CFG.all[k]!=null)return CFG.all[k];return ADM_DEF?ADM_DEF[k]:undefined}
   function admPush(){
     admTimer=null;if(!isStaff()||!NCMP.ws)return;
@@ -18151,6 +18180,10 @@ if(NCMP.on){
     R.x=me.x;R.y=me.y;R.hp=Math.min(maxHp(),me.hp||maxHp());R.mp=Math.min(maxMp(),me.mp||maxMp());
     NCMP.srv={x:me.x,y:me.y};NCMP.moving=false;NCMP.lastDir=null;NCMP.lastWp=null;NCMP.hist.length=0;NCMP.corr={x:0,y:0};NCMP.clk=null;
     if(m.tick>0)NCMP.tickMs=1000/m.tick;if(m.snap>0)NCMP.snapMs=1000/m.snap;
+    /* 10/11: el servidor mueve a velocidad de clase × MOVE_MUL (movilidad estilo Regnum, R1). La predicción local de la
+       0.3.4 usa c.spd × OPT.speed: sin este factor el Alpha predecía ~1,8 veces más rápido y el servidor lo corregía
+       (retrocesos, tirones; pruebas tmp1/tmp4). */
+    try{var cs=C().spd;NCMP.spdMul=(me.speed>0&&cs>0)?me.speed/cs:1}catch(x){NCMP.spdMul=1}OPT.speed=NCMP.spdMul;
     $("#intro").hidden=true;show(false);msg("");
     el("mpBarT").textContent="En línea · "+me.name;bar.hidden=false;
     NCMP.inWorld=true;keys={};
